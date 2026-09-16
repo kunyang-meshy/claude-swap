@@ -4,7 +4,8 @@ Multi-account switcher for Claude Code. Easily switch between multiple Claude ac
 
 ## CLI-only fork: keep Claude Desktop independent
 
-This fork adds `claude-cli` and `cswap-cli`. They use `~/.claude-cli` for
+This fork makes `claude-swap`, `cswap` and `cswap-cli` CLI-only, and adds
+`claude-cli` to launch Claude Code in the same profile. They use `~/.claude-cli` for
 the CLI login and `~/.claude-cli/swap` for its account list, usage cache,
 settings and auto-switch state. On macOS both the active credential and stored
 account backups have their own Keychain namespaces. Desktop's default login,
@@ -47,8 +48,8 @@ Set `CLAUDE_SWAP_CLI_DIR` to an absolute path before launching either command
 to use a different CLI profile. Each profile gets its own backup namespace.
 `cswap-cli purge` only removes that profile's Swap data. Upstream self-upgrade
 is refused by `cswap-cli`; update from this fork to retain the isolation changes.
-The original `cswap` and `claude-swap` entry points remain available for the
-default profile when explicitly invoked without these aliases.
+All installed Swap entry points select CLI-only mode, including commands
+invoked by absolute path. The upstream library entry point is unchanged.
 
 ## Installation
 

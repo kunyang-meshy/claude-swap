@@ -40,8 +40,8 @@ Repository = "https://github.com/kunyang-meshy/claude-swap"
 Issues = "https://github.com/realiti4/claude-swap/issues"
 
 [project.scripts]
-claude-swap = "claude_swap.cli:main"
-cswap = "claude_swap.cli:main"
+claude-swap = "claude_swap.cli_profile:swap_main"
+cswap = "claude_swap.cli_profile:swap_main"
 cswap-cli = "claude_swap.cli_profile:swap_main"
 claude-cli = "claude_swap.cli_profile:claude_main"
 
