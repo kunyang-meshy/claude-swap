@@ -39,6 +39,23 @@ continues. Once usage becomes readable again, the usual threshold policy
 resumes. Manual switches still work. The setting defaults to `true` for
 compatibility with upstream, so apply the command above to disable failover.
 
+To prioritize expiring weekly quota while keeping the threshold trigger:
+
+```bash
+cswap-cli config set autoswitch.strategy fable-reset-first
+```
+
+This strategy only selects a target after the usual threshold is reached; it
+does not switch early just because another account resets sooner. Candidates
+must be below the configured account-wide threshold and report remaining Fable
+quota. Among eligible accounts, the earliest **account-wide 7-day reset** wins;
+ties prefer more remaining Fable quota, then more account-wide headroom, then
+account order. Unknown or elapsed reset timestamps sort last. Exhausted or
+unreadable Fable quota and API-key accounts are excluded. If no candidate
+qualifies, the current account stays active. Cooldown and no-return protection
+still apply. This does not add Fable to the active account's trigger windows;
+`autoswitch.model` remains a separate setting.
+
 Use a **fresh CLI login**. Importing the old Desktop/default credentials would
 share a rotating OAuth token family even with separate files, allowing a refresh
 on one side to invalidate the other. The isolated account list starts empty for

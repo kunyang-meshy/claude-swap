@@ -2832,6 +2832,151 @@ def _usage7(pct5: float, pct7: float, reset7: str | None = None) -> dict:
     return {"five_hour": {"pct": pct5}, "seven_day": seven}
 
 
+class TestFableResetFirstStrategy:
+    def _harness(self, temp_home: Path, **kwargs) -> EngineHarness:
+        h = EngineHarness(
+            temp_home, strategy="fable-reset-first", threshold=95,
+            failover_enabled=False, **kwargs,
+        )
+        for num in range(1, 4):
+            h.seed(num, f"team{num}@example.com")
+        h.make_live("team1@example.com", 1)
+        return h
+
+    @staticmethod
+    def usage(pct: float, fable: float = 20, reset: str | None = _R_SOON) -> dict:
+        return {
+            **_usage7(pct, 10, reset),
+            "scoped": [{"name": "Fable", "pct": fable}],
+        }
+
+    def test_no_early_switch_even_when_fable_is_exhausted(self, temp_home):
+        h = self._harness(temp_home)
+        assert h.tick_with_usage({
+            "1": self.usage(94.9, 100, _R_LATEST),
+            "2": self.usage(10), "3": self.usage(20),
+        }) is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        assert h.events[-1].reason == "below-threshold"
+
+    @pytest.mark.parametrize("active_pct", [95, 100])
+    def test_six_teams_prioritize_weekly_reset_with_fable_available(
+        self, temp_home, active_pct,
+    ):
+        h = self._harness(temp_home)
+        for num in range(4, 7):
+            h.seed(num, f"team{num}@example.com")
+        assert h.tick_with_usage({
+            "1": self.usage(active_pct),
+            "2": self.usage(10, 100, _R_SOON),  # exhausted Fable
+            "3": self.usage(100, 10, _R_SOON),  # exhausted account-wide quota
+            "4": self.usage(75, 99, _R_LATER),  # usable and resets first
+            "5": self.usage(10, 0, _R_LATEST),  # more quota, but later reset
+            "6": self.usage(20, 20, None),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 4
+        event = next(e for e in h.events if isinstance(e, SwitchEvent))
+        assert event.trigger == ("proactive" if active_pct == 95 else "at-limit")
+
+    @pytest.mark.parametrize("scoped", [
+        None, [], [{"name": "Opus", "pct": 0}],
+        [{"name": "Fable", "pct": 100}],
+        [{"name": "Fable", "pct": 101}],
+        [{"name": "Fable", "pct": None}],
+        [{"name": "Fable", "pct": "0"}],
+        [{"name": "Fable", "pct": -1}],
+        [{"name": "Fable", "pct": True}],
+        [{"name": "Fable", "pct": float("nan")}],
+        [{"name": "Fable", "pct": float("inf")}],
+        [{"name": "Fable", "pct": 20}, {"name": "Fable", "pct": 100}],
+    ])
+    def test_unavailable_fable_is_never_selected(self, temp_home, scoped):
+        h = self._harness(temp_home)
+        soonest = self.usage(10)
+        soonest["scoped"] = scoped
+        assert h.tick_with_usage({
+            "1": self.usage(95), "2": soonest,
+            "3": self.usage(20, 20, _R_LATER),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_same_reset_prefers_more_fable_over_account_headroom(self, temp_home):
+        h = self._harness(temp_home)
+        more_fable = self.usage(75, 20)
+        more_fable["scoped"][0]["name"] = "fAbLe"
+        assert h.tick_with_usage({
+            "1": self.usage(95), "2": self.usage(10, 60), "3": more_fable,
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    @pytest.mark.parametrize("unknown_reset", [None, _R_PAST, "invalid"])
+    def test_unknown_or_elapsed_reset_sorts_after_future_reset(self, temp_home, unknown_reset):
+        h = self._harness(temp_home)
+        assert h.tick_with_usage({
+            "1": self.usage(95), "2": self.usage(10, 0, unknown_reset),
+            "3": self.usage(75, 20, _R_LATEST),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    @pytest.mark.parametrize("active_pct", [95, 100])
+    def test_keeps_current_when_all_candidates_are_at_threshold(self, temp_home, active_pct):
+        h = self._harness(temp_home)
+        assert h.tick_with_usage({
+            "1": self.usage(active_pct), "2": self.usage(95), "3": self.usage(98),
+        }) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        assert h.events[-1].reason == "no-fable-candidate"
+
+    def test_no_fable_quota_does_not_fall_back_to_api_key(self, temp_home):
+        h = self._harness(temp_home, include_api_key_accounts=True)
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["3"]["kind"] = "api_key"
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        assert h.tick_with_usage({
+            "1": self.usage(95), "2": self.usage(10, 100), "3": None,
+        }) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+
+    @pytest.mark.parametrize("unavailable", [None, USAGE_TOKEN_EXPIRED, USAGE_FOREIGN_CREDENTIAL])
+    def test_failover_stays_disabled(self, temp_home, unavailable):
+        h = self._harness(temp_home)
+        for _ in range(6):
+            assert h.tick_with_usage({
+                "1": unavailable, "2": self.usage(10), "3": self.usage(20),
+            }) is TickOutcome.NO_ACTION
+            h.clock.advance(600)
+        assert h.active_number() == 1
+        assert h.events[-1].reason == "failover-disabled"
+
+    def test_cooldown_still_applies_after_switching(self, temp_home):
+        h = self._harness(temp_home)
+        assert h.tick_with_usage({
+            "1": self.usage(95), "2": self.usage(10),
+            "3": self.usage(20, 20, _R_LATER),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        h.make_live("team2@example.com", 2)
+        assert h.tick_with_usage({
+            "1": self.usage(10), "2": self.usage(95), "3": self.usage(20),
+        }) is TickOutcome.NO_ACTION
+        assert h.active_number() == 2
+        assert h.events[-1].reason == "cooldown"
+
+    def test_no_return_guard_skips_recently_left_account(self, temp_home):
+        h = self._harness(temp_home)
+        assert h.tick_with_usage({
+            "1": self.usage(95), "2": self.usage(10),
+            "3": self.usage(20, 20, _R_LATER),
+        }) is TickOutcome.SWITCHED
+        h.make_live("team2@example.com", 2)
+        h.clock.advance(301)
+        assert h.tick_with_usage({
+            "1": self.usage(94), "2": self.usage(95),
+            "3": self.usage(20, 20, _R_LATER),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+
 class TestConsumeFirstStrategy:
     def _harness(self, temp_home: Path) -> EngineHarness:
         h = EngineHarness(temp_home, strategy="consume-first")
@@ -6943,4 +7088,3 @@ class TestFreshenRoutesThroughGate:
         assert verdict == "ok"
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
-

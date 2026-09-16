@@ -559,6 +559,28 @@ def _seven_day_reset_ts(usage: dict | str | None, now: float) -> float | None:
     return None
 
 
+def _fable_headroom(usage: dict | str | None) -> float | None:
+    """Remaining Fable quota, requiring an explicit, valid model window."""
+    if not isinstance(usage, dict) or not isinstance(usage.get("scoped"), list):
+        return None
+    windows = [
+        window for window in usage["scoped"]
+        if isinstance(window, dict)
+        and isinstance(window.get("name"), str)
+        and window["name"].casefold() == "fable"
+    ]
+    if not windows:
+        return None
+    percentages = [window.get("pct") for window in windows]
+    if any(
+        isinstance(pct, bool) or not isinstance(pct, (int, float))
+        or not math.isfinite(pct) or pct < 0
+        for pct in percentages
+    ):
+        return None
+    return max(0.0, 100.0 - max(percentages))
+
+
 def _binding_recovery_ts(
     usage: dict | str | None, models: Sequence[str], now: float
 ) -> float:
@@ -1232,13 +1254,27 @@ class AutoSwitchEngine:
                 now=decided_now,
             )
 
-        if not ordered and api_key_candidates and trigger != "consume-first":
+        if (
+            not ordered and api_key_candidates and trigger != "consume-first"
+            and settings.strategy != "fable-reset-first"
+        ):
             # Last resort when we must move: metered API-key accounts
             # (unmeasurable headroom). Never for a below-threshold consume-first
             # nudge — those API-key accounts have no weekly window to consume.
             ordered = api_key_candidates
 
         if not ordered:
+            if settings.strategy == "fable-reset-first":
+                self._emit(
+                    NoSwitchEvent(
+                        reason="no-fable-candidate",
+                        detail=(
+                            "no eligible account below the threshold has "
+                            "confirmed remaining Fable quota; keeping the current account"
+                        ),
+                    )
+                )
+                return TickOutcome.BLOCKED
             if not any_known:
                 # No candidate readable this tick — true for every strategy,
                 # and must not be dressed up as a consume-first hold.
@@ -1788,6 +1824,30 @@ class AutoSwitchEngine:
         twice per tick: on the stored snapshot to decide provisionally, then
         on the escalated refetch to re-verify before switching.
         """
+        if settings.strategy == "fable-reset-first":
+            # Only target selection changes: tick() still requires the usual
+            # threshold, cooldown and failover policy. Never land on another
+            # account already at the threshold, even when all peers are high.
+            ranked: list[tuple[tuple, str]] = []
+            any_known = False
+            for num in oauth_candidates:
+                h = headroom.get(num)
+                if h is None or not math.isfinite(h):
+                    continue
+                any_known = True
+                if num == no_return or (100.0 - h) >= settings.threshold:
+                    continue
+                fable = _fable_headroom(usage.get(num))
+                if fable is None or fable <= 0:
+                    continue
+                reset_ts = _seven_day_reset_ts(usage.get(num), now)
+                ranked.append(((
+                    reset_ts if reset_ts is not None else float("inf"),
+                    -fable, -h,
+                ), num))
+            ranked.sort(key=lambda candidate: candidate[0])
+            return [num for _, num in ranked], any_known, None
+
         # consume-first ranks by soonest weekly reset; a proactive (below-
         # threshold) target must reset strictly sooner than where we are.
         active_reset_ts = (

@@ -98,6 +98,16 @@ class TestLoadSettings:
         set_setting(tmp_path, "autoswitch.strategy", "consume-first")
         assert load_settings(tmp_path).strategy == "consume-first"
 
+    def test_fable_reset_first_preserves_trigger_settings(self, tmp_path: Path):
+        set_setting(tmp_path, "autoswitch.threshold", "95")
+        set_setting(tmp_path, "autoswitch.failoverEnabled", "false")
+        set_setting(tmp_path, "autoswitch.strategy", "fable-reset-first")
+        loaded = load_settings(tmp_path)
+        assert loaded.strategy == "fable-reset-first"
+        assert loaded.threshold == 95
+        assert loaded.failover_enabled is False
+        assert loaded.model is None
+
 
 class TestSaveSettings:
     def test_roundtrip(self, tmp_path: Path):
