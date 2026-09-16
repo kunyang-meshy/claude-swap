@@ -606,6 +606,56 @@ class TestDecisionTable:
         assert harness.engine._next_delay(outcome) == NO_RESET_FALLBACK_S
 
 
+class TestFailoverDisabled:
+    @pytest.mark.parametrize("unavailable", [
+        None, USAGE_TOKEN_EXPIRED, USAGE_FOREIGN_CREDENTIAL,
+    ])
+    def test_persistent_failure_keeps_account_and_login(self, harness, unavailable):
+        harness.engine.settings = replace(
+            harness.settings, threshold=95, failover_enabled=False,
+        )
+        for num in range(4, 7):
+            harness.seed(num, f"team{num}@example.com")
+        live_config = harness.temp_home / ".claude.json"
+        live_credentials = harness.temp_home / ".claude" / ".credentials.json"
+        before = (live_config.read_bytes(), live_credentials.read_bytes())
+        usage = {str(num): _usage(10) for num in range(1, 7)}
+        usage["1"] = unavailable
+        for _ in range(10):
+            assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
+            harness.clock.advance(IDLE_HOLD_MAX_S + 1)
+        assert harness.active_number() == 1
+        assert (live_config.read_bytes(), live_credentials.read_bytes()) == before
+        assert harness.engine._unhealthy_ticks == 0
+        assert not any(isinstance(e, SwitchEvent) for e in harness.events)
+        assert {
+            e.reason for e in harness.events if isinstance(e, NoSwitchEvent)
+        } == {"failover-disabled"}
+
+    @pytest.mark.parametrize("window,pct,expected", [
+        ("five_hour", 94, TickOutcome.NO_ACTION),
+        ("five_hour", 95, TickOutcome.SWITCHED),
+        ("five_hour", 100, TickOutcome.SWITCHED),
+        ("seven_day", 95, TickOutcome.SWITCHED),
+    ])
+    def test_recovered_usage_resumes_threshold_switching(
+        self, harness, window, pct, expected,
+    ):
+        harness.engine.settings = replace(
+            harness.settings, threshold=95, failover_enabled=False,
+        )
+        usage = {"1": None, "2": _usage(10), "3": _usage(50)}
+        for _ in range(5):
+            assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
+        usage["1"] = _usage(0)
+        usage["1"][window]["pct"] = pct
+        assert harness.tick_with_usage(usage) is expected
+        assert harness.active_number() == (2 if expected is TickOutcome.SWITCHED else 1)
+        assert all(
+            e.trigger != "failover" for e in harness.events if isinstance(e, SwitchEvent)
+        )
+
+
 class TestIdleHold:
     """Active token expired while Claude Code owns it → hold, don't fail over."""
 

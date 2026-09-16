@@ -18,6 +18,7 @@ cswap-cli init
 claude-cli auth login
 cswap-cli add
 cswap-cli config set autoswitch.threshold 95
+cswap-cli config set autoswitch.failoverEnabled false
 cswap-cli menubar
 ```
 
@@ -28,6 +29,12 @@ menu bar first, and restart existing terminal Claude Code sessions with
 customizations, plugins and conversation history through symlinks on macOS/Linux;
 it does not share login files or live-session registrations. Windows starts with
 independent customizations/history.
+
+With `autoswitch.failoverEnabled=false`, unreadable usage, expired tokens and
+credential mismatches keep the current account indefinitely while polling
+continues. Once usage becomes readable again, the usual threshold policy
+resumes. Manual switches still work. The setting defaults to `true` for
+compatibility with upstream, so apply the command above to disable failover.
 
 Use a **fresh CLI login**. Importing the old Desktop/default credentials would
 share a rotating OAuth token family even with separate files, allowing a refresh

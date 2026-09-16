@@ -20,7 +20,9 @@ activation the target's token is *freshened* (refreshed if it expires within
 under-lock re-read sees a fresh token and aborts its own refresh); a target
 whose refresh token is dead gets quarantined instead of activated. When the
 active account's own usage becomes unreadable for ``unhealthy_ticks``
-consecutive ticks, the engine fails over to any healthy candidate.
+consecutive ticks, the engine fails over to any healthy candidate only if
+``failover_enabled`` is true. Otherwise it keeps the active account and polls
+until usage is readable again, without a timeout that forces a switch.
 
 Cooldown and quarantine persist in ``<backup_root>/autoswitch_state.json``
 (so cron-driven ``cswap auto --once`` ticks behave across processes), mutated
@@ -999,6 +1001,19 @@ class AutoSwitchEngine:
             else:
                 trigger = "at-limit" if active_headroom <= 0 else "proactive"
         else:
+            if not settings.failover_enabled:
+                # Unknown usage is not evidence of an exhausted quota. Keep
+                # polling this account without accumulating a delayed failover,
+                # including expired tokens and foreign-credential sentinels.
+                self._unhealthy_ticks = 0
+                self._idle_hold_since = None
+                self._emit(
+                    NoSwitchEvent(
+                        reason="failover-disabled",
+                        detail="active usage unavailable; keeping the current account",
+                    )
+                )
+                return TickOutcome.NO_ACTION
             if usage.get(current) == USAGE_TOKEN_EXPIRED:
                 # Expired and the refresh could not complete this pass (lock
                 # contention, unattributable lineage, failed persist, or the

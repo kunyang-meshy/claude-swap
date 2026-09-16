@@ -171,6 +171,14 @@ class TestSettingSpecs:
 
 
 class TestSetUnsetSetting:
+    def test_disable_failover_persists_without_changing_threshold(self, tmp_path: Path):
+        set_setting(tmp_path, "autoswitch.threshold", "95")
+        assert set_setting(tmp_path, "autoswitch.failoverEnabled", "false") is False
+        settings = load_settings(tmp_path)
+        assert settings.failover_enabled is False
+        assert settings.threshold == 95
+        assert merged_with_cli(settings, _args(interval=120)).failover_enabled is False
+
     def test_set_writes_minimal_file(self, tmp_path: Path):
         value = set_setting(tmp_path, "autoswitch.threshold", "80")
         assert value == 80.0
