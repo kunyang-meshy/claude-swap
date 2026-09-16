@@ -513,6 +513,10 @@ def run_migrations(switcher: "ClaudeAccountSwitcher") -> None:
     failing migration is logged and left unmarked so it retries next run; it
     must never abort switcher construction.
     """
+    from claude_swap.cli_profile import enabled
+
+    if enabled():
+        return  # Legacy Keychain entries belong to the default roster.
     if not switcher.backup_dir.exists():
         return
 

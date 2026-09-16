@@ -96,13 +96,17 @@ def resolve_program() -> list[str]:
     candidate = sys.argv[0] if sys.argv and sys.argv[0] else None
     if candidate is not None:
         absolute = Path(os.path.abspath(candidate))
-        if absolute.name == "cswap" and absolute.is_file():
+        if absolute.name in {"cswap", "cswap-cli"} and absolute.is_file():
             return [str(absolute)]
 
-    which = shutil.which("cswap")
+    from claude_swap.cli_profile import enabled
+
+    which = shutil.which("cswap-cli" if enabled() else "cswap")
     if which:
         return [str(Path(os.path.abspath(which)))]
 
+    if enabled():
+        return [sys.executable, "-c", "from claude_swap.cli_profile import swap_main; swap_main()"]
     return [sys.executable, "-m", "claude_swap"]
 
 
@@ -131,6 +135,11 @@ def build_plist(
     """
     program = program or resolve_program()
     out_log, err_log = log_paths(label, home)
+    environment = {"PATH": _path_env(program)}
+    from claude_swap.cli_profile import enabled, profile_dir
+
+    if enabled():
+        environment["CLAUDE_SWAP_CLI_DIR"] = str(profile_dir())
     return plistlib.dumps(
         {
             "Label": label,
@@ -144,7 +153,7 @@ def build_plist(
             # A menu bar owner is a UI process; Background would have launchd
             # apply throttled I/O and CPU bands to it.
             "ProcessType": "Interactive",
-            "EnvironmentVariables": {"PATH": _path_env(program)},
+            "EnvironmentVariables": environment,
             "StandardOutPath": str(out_log),
             "StandardErrorPath": str(err_log),
         }

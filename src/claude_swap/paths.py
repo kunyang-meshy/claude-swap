@@ -98,6 +98,10 @@ def get_backup_root() -> Path:
     via systemd unit files or Dockerfiles (which don't get shell expansion)
     still work.
     """
+    from claude_swap.cli_profile import enabled, profile_dir
+
+    if enabled():
+        return profile_dir() / "swap"
     if Platform.detect() in (Platform.LINUX, Platform.WSL):
         xdg = os.environ.get("XDG_DATA_HOME", "")
         if xdg:
@@ -179,6 +183,10 @@ def migrate_legacy_backup_dir(target: Path) -> bool:
     Raises:
         MigrationError: on a genuine collision, or when ``shutil.move`` fails.
     """
+    from claude_swap.cli_profile import enabled
+
+    if enabled():
+        return False  # An isolated CLI roster must never absorb the default roster.
     legacy = get_legacy_backup_root()
     try:
         same_path = legacy.resolve() == target.resolve()

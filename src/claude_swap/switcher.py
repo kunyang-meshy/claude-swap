@@ -45,6 +45,7 @@ from claude_swap.json_output import (
 from claude_swap.credentials import (  # noqa: F401  (constants re-exported for migrations/tests)
     CLAUDE_CODE_KEYCHAIN_SERVICE,
     SECURITY_SERVICE,
+    backup_keychain_service,
     ActiveCredentials,
     CredentialStore,
     looks_like_api_key,
@@ -7292,7 +7293,9 @@ class ClaudeAccountSwitcher:
         """
         self._refuse_session_shell()
         legacy = get_legacy_backup_root()
-        legacy_distinct = legacy != self.backup_dir
+        from claude_swap.cli_profile import enabled as cli_only
+
+        legacy_distinct = not cli_only() and legacy != self.backup_dir
 
         # Refuse while any session-mode claude is running: purging would pull
         # its profile (and keychain entry) out from under a live process.
@@ -7378,7 +7381,7 @@ class ClaudeAccountSwitcher:
                 if self.platform == Platform.MACOS:
                     for username in usernames:
                         try:
-                            macos_keychain.delete_password(SECURITY_SERVICE, username)
+                            macos_keychain.delete_password(backup_keychain_service(), username)
                             removed_items.append(f"Credential: {username}")
                         except Exception:
                             pass  # Ignore errors during purge
@@ -7387,7 +7390,7 @@ class ClaudeAccountSwitcher:
                 # Manager entries left behind by an incomplete keyring → files
                 # (Windows) or keyring → security (macOS) migration. Linux/WSL
                 # never used a keyring backend.
-                if self.platform in (Platform.MACOS, Platform.WINDOWS):
+                if not cli_only() and self.platform in (Platform.MACOS, Platform.WINDOWS):
                     _sweep_legacy_keyring(usernames, removed_items)
 
         # Session-profile keychain entries must go BEFORE the backup dir:

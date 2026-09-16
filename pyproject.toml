@@ -1,6 +1,6 @@
 [project]
 name = "claude-swap"
-version = "0.27.0b1"
+version = "0.27.0b1+cli.1"
 description = "Multi-account switcher for Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -35,13 +35,15 @@ classifiers = [
 menubar = ["rumps>=0.4.0"]
 
 [project.urls]
-Homepage = "https://github.com/realiti4/claude-swap"
-Repository = "https://github.com/realiti4/claude-swap"
+Homepage = "https://github.com/kunyang-meshy/claude-swap"
+Repository = "https://github.com/kunyang-meshy/claude-swap"
 Issues = "https://github.com/realiti4/claude-swap/issues"
 
 [project.scripts]
 claude-swap = "claude_swap.cli:main"
 cswap = "claude_swap.cli:main"
+cswap-cli = "claude_swap.cli_profile:swap_main"
+claude-cli = "claude_swap.cli_profile:claude_main"
 
 [build-system]
 requires = ["hatchling"]

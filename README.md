@@ -2,6 +2,54 @@
 
 Multi-account switcher for Claude Code. Easily switch between multiple Claude accounts without logging out, or let it switch for you before you hit a rate limit. Track usage for every account in a live dashboard, and run accounts in parallel. Works with both the Claude Code CLI and the VS Code extension.
 
+## CLI-only fork: keep Claude Desktop independent
+
+This fork adds `claude-cli` and `cswap-cli`. They use `~/.claude-cli` for
+the CLI login and `~/.claude-cli/swap` for its account list, usage cache,
+settings and auto-switch state. On macOS both the active credential and stored
+account backups have their own Keychain namespaces. Desktop's default login,
+configuration and account backups are not consulted or migrated.
+
+```bash
+uv tool install --force --with rumps \
+  'git+https://github.com/kunyang-meshy/claude-swap@codex/cli-desktop-isolation'
+cswap-cli init
+claude-cli auth login
+cswap-cli add
+cswap-cli config set autoswitch.threshold 95
+cswap-cli menubar
+```
+
+Log in and `cswap-cli add` for each CLI account/Team you want in rotation.
+Enable auto-switch in the menu bar as usual. Quit the old default-profile
+menu bar first, and restart existing terminal Claude Code sessions with
+`claude-cli --resume` so they adopt the isolated profile. `init` shares existing
+customizations, plugins and conversation history through symlinks on macOS/Linux;
+it does not share login files or live-session registrations. Windows starts with
+independent customizations/history.
+
+Use a **fresh CLI login**. Importing the old Desktop/default credentials would
+share a rotating OAuth token family even with separate files, allowing a refresh
+on one side to invalidate the other. The isolated account list starts empty for
+this reason. The same account/Team can still be used on both sides through
+separate logins.
+
+Optional terminal aliases (do not globally export the configuration directory):
+
+```bash
+alias claude=claude-cli
+alias claude-swap=cswap-cli
+alias cswap=cswap-cli
+```
+
+`cswap-cli menubar --install-service` preserves the isolated launcher at login.
+Set `CLAUDE_SWAP_CLI_DIR` to an absolute path before launching either command
+to use a different CLI profile. Each profile gets its own backup namespace.
+`cswap-cli purge` only removes that profile's Swap data. Upstream self-upgrade
+is refused by `cswap-cli`; update from this fork to retain the isolation changes.
+The original `cswap` and `claude-swap` entry points remain available for the
+default profile when explicitly invoked without these aliases.
+
 ## Installation
 
 ### Using uv (recommended)
