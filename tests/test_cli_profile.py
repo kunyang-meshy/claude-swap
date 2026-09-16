@@ -65,8 +65,9 @@ def test_initialization_shares_history_but_never_login_or_session_state(temp_hom
     directory = cli_profile.initialize()
     assert (directory / "settings.json").resolve() == default / "settings.json"
     assert (directory / "projects").resolve() == default / "projects"
-    for name in (".credentials.json", ".config.json", ".claude.json", "sessions"):
+    for name in (".credentials.json", ".config.json", "sessions"):
         assert not (directory / name).exists()
+    assert "oauthAccount" not in json.loads((directory / ".claude.json").read_text())
     assert cli_profile.initialize() == directory  # Idempotent; no clobbering.
 
 
@@ -78,6 +79,75 @@ def test_claude_launcher_passes_arguments_and_isolated_environment(temp_home, mo
     cli_profile.claude_main()
     execute.assert_called_once_with("/native/claude", ["/native/claude", "--resume", "session-1"])
     assert os.environ["CLAUDE_CONFIG_DIR"] == str(temp_home / ".claude-cli")
+
+
+def test_initialization_restores_only_preferences_and_existing_project_approvals(temp_home):
+    source = temp_home / ".claude.json"
+    source.write_text(json.dumps({
+        "hasCompletedOnboarding": True,
+        "lastOnboardingVersion": "2.1.211",
+        "theme": "light",
+        "oauthAccount": {"emailAddress": "desktop@example.com"},
+        "primaryApiKey": "test-default-key",
+        "userID": "default-instance",
+        "mcpServers": {"private": {"headers": {"Authorization": "test-only"}}},
+        "projects": {
+            "/trusted": {"hasTrustDialogAccepted": True, "allowedTools": ["Read"],
+                         "lastSessionId": "old-session", "mcpServers": {"private": {}}},
+            "/untrusted": {"hasTrustDialogAccepted": False},
+        },
+    }))
+    before = source.read_bytes()
+    directory = cli_profile.initialize()
+    actual = json.loads((directory / ".claude.json").read_text())
+    assert actual["hasCompletedOnboarding"] is True
+    assert actual["theme"] == "light"
+    assert actual["projects"] == {
+        "/trusted": {"hasTrustDialogAccepted": True, "allowedTools": ["Read"]},
+        "/untrusted": {"hasTrustDialogAccepted": False},
+    }
+    for key in ("oauthAccount", "primaryApiKey", "userID", "mcpServers"):
+        assert key not in actual
+    assert source.read_bytes() == before
+
+
+def test_existing_cli_login_and_choices_win_and_migration_runs_once(temp_home):
+    source = temp_home / ".claude.json"
+    source.write_text(json.dumps({
+        "theme": "light", "hasCompletedOnboarding": True,
+        "projects": {"/existing": {"hasTrustDialogAccepted": True},
+                     "/missing": {"hasTrustDialogAccepted": True}},
+    }))
+    directory = cli_profile.activate()
+    directory.mkdir()
+    config = directory / ".claude.json"
+    login = {"emailAddress": "cli@example.com", "organizationUuid": "team-6"}
+    config.write_text(json.dumps({
+        "oauthAccount": login, "theme": "dark", "lastOnboardingVersion": "2.1.273",
+        "projects": {"/existing": {"hasTrustDialogAccepted": False}},
+    }))
+    cli_profile.initialize()
+    actual = json.loads(config.read_text())
+    assert actual["oauthAccount"] == login
+    assert actual["theme"] == "dark"
+    assert actual["lastOnboardingVersion"] == "2.1.273"
+    assert actual["hasCompletedOnboarding"] is True
+    assert actual["projects"]["/existing"]["hasTrustDialogAccepted"] is False
+    assert actual["projects"]["/missing"]["hasTrustDialogAccepted"] is True
+    del actual["projects"]["/missing"]
+    config.write_text(json.dumps(actual))
+    cli_profile.initialize()
+    assert json.loads(config.read_text()) == actual
+
+
+def test_malformed_cli_config_is_not_overwritten(temp_home):
+    directory = cli_profile.activate()
+    directory.mkdir()
+    config = directory / ".claude.json"
+    config.write_text('{"oauthAccount":')
+    with pytest.raises(ConfigError, match="left unchanged"):
+        cli_profile.initialize()
+    assert config.read_text() == '{"oauthAccount":'
 
 
 def test_active_and_backup_writes_and_deletes_never_touch_default_keychain(

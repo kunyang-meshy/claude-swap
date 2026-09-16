@@ -9,11 +9,80 @@ rotating OAuth token family with a still-running Desktop instance.
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import sys
 
 from claude_swap.exceptions import ConfigError
+
+
+_PREFERENCES_VERSION_KEY = "claudeSwapCliPreferencesVersion"
+_GLOBAL_PREFERENCES = (
+    "hasCompletedOnboarding", "lastOnboardingVersion", "theme",
+    "preferredNotifChannel", "shiftEnterKeyBindingInstalled",
+    "optionAsMetaKeyInstalled", "hasUsedBackslashReturn", "autoCompactEnabled",
+    "verbose", "editorMode", "diffSidebarOpen", "hasSeenTasksHint",
+    "lastReleaseNotesSeen",
+)
+_PROJECT_PREFERENCES = (
+    "allowedTools", "enabledMcpjsonServers", "disabledMcpjsonServers",
+    "hasTrustDialogAccepted", "hasCompletedProjectOnboarding",
+    "hasClaudeMdExternalIncludesApproved", "hasClaudeMdExternalIncludesWarningShown",
+    "projectOnboardingSeenCount", "ignorePatterns", "localSettingsSeenGitTracked",
+)
+
+
+def _read_config(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        raise ConfigError(f"Cannot read preferences from {path}; file left unchanged") from error
+    if not isinstance(data, dict):
+        raise ConfigError(f"Expected a JSON object in {path}; file left unchanged")
+    return data
+
+
+def _initialize_preferences() -> None:
+    """Once, fill missing UI/project preferences without importing auth state.
+
+    Explicit allowlists exclude OAuth, API keys, MCP credentials, account
+    caches and instance/session state. Existing CLI choices always win.
+    """
+    from claude_swap.claude_locks import claude_config_lock
+    from claude_swap.paths import get_default_global_config_path, get_global_config_path
+    from claude_swap.settings import atomic_write_json
+
+    target = get_global_config_path()
+    if _read_config(target).get(_PREFERENCES_VERSION_KEY) == 1:
+        return
+    source = _read_config(get_default_global_config_path())
+    with claude_config_lock():
+        current = _read_config(target)
+        if current.get(_PREFERENCES_VERSION_KEY) == 1:
+            return
+        for key in _GLOBAL_PREFERENCES:
+            if key in source and isinstance(source[key], (str, bool, int, float)):
+                current.setdefault(key, source[key])
+        source_projects = source.get("projects")
+        if isinstance(source_projects, dict):
+            projects = current.setdefault("projects", {})
+            if not isinstance(projects, dict):
+                raise ConfigError(f"Invalid projects in {target}; file left unchanged")
+            for path, values in source_projects.items():
+                if not isinstance(values, dict):
+                    continue
+                preferences = {key: values[key] for key in _PROJECT_PREFERENCES if key in values}
+                if not preferences:
+                    continue
+                project = projects.setdefault(path, {})
+                if isinstance(project, dict):
+                    for key, value in preferences.items():
+                        project.setdefault(key, value)
+        current[_PREFERENCES_VERSION_KEY] = 1
+        atomic_write_json(target, current)
 
 
 def enabled() -> bool:
@@ -46,7 +115,7 @@ def activate() -> Path:
 
 
 def initialize() -> Path:
-    """Share customizations/history, but create no login or session state."""
+    """Share customizations/history and seed preferences, but never logins."""
     directory = activate()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "nt":
@@ -59,6 +128,7 @@ def initialize() -> Path:
             target = directory / name
             if source.exists() and not target.exists() and not target.is_symlink():
                 target.symlink_to(source, target_is_directory=source.is_dir())
+    _initialize_preferences()
     return directory
 
 
@@ -77,7 +147,7 @@ def swap_main() -> None:
 
 
 def claude_main() -> None:
-    activate()
+    initialize()
     executable = shutil.which("claude")
     if executable is None:
         raise ConfigError("Claude Code is not installed or not on PATH")

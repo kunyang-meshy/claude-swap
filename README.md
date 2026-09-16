@@ -9,7 +9,7 @@ This fork makes `claude-swap`, `cswap` and `cswap-cli` CLI-only, and adds
 the CLI login and `~/.claude-cli/swap` for its account list, usage cache,
 settings and auto-switch state. On macOS both the active credential and stored
 account backups have their own Keychain namespaces. Desktop's default login,
-configuration and account backups are not consulted or migrated.
+account state and account backups are not migrated.
 
 ```bash
 uv tool install --force --with rumps \
@@ -27,8 +27,11 @@ Enable auto-switch in the menu bar as usual. Quit the old default-profile
 menu bar first, and restart existing terminal Claude Code sessions with
 `claude-cli --resume` so they adopt the isolated profile. `init` shares existing
 customizations, plugins and conversation history through symlinks on macOS/Linux;
-it does not share login files or live-session registrations. Windows starts with
-independent customizations/history.
+it does not share login files or live-session registrations. On `init` or the
+first `claude-cli` launch, existing onboarding, display and project approval
+preferences are copied once through explicit allowlists. Existing CLI choices
+take priority; login state, account caches and MCP credentials stay separate.
+Windows starts with independent customizations/history.
 
 With `autoswitch.failoverEnabled=false`, unreadable usage, expired tokens and
 credential mismatches keep the current account indefinitely while polling
