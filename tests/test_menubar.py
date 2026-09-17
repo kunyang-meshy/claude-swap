@@ -224,18 +224,18 @@ def test_usage_summary_scoped_no_pace_marker_on_window_rolled_to_zero():
 
 
 def test_format_account_label():
-    label = menubar.format_account_label(2, "loc@papaya.asia", _USAGE)
-    assert label == "2  loc@papaya.asia  5h 42% · 7d 18% · $ 30%"
+    label = menubar.format_account_label(2, "Engineering", _USAGE)
+    assert label == "2  Engineering  5h 42% · 7d 18% · $ 30%"
 
 
-def test_format_account_label_with_alias():
-    label = menubar.format_account_label(2, "loc@papaya.asia", _USAGE, alias="dev")
-    assert label == "2  dev  (loc@papaya.asia)  5h 42% · 7d 18% · $ 30%"
+def test_format_account_label_without_team_name():
+    label = menubar.format_account_label(2, "", _USAGE)
+    assert label == "2  Personal  5h 42% · 7d 18% · $ 30%"
 
 
 def test_format_account_label_disabled_marker():
-    label = menubar.format_account_label(2, "loc@papaya.asia", _USAGE, disabled=True)
-    assert label == "2  loc@papaya.asia  (disabled)  5h 42% · 7d 18% · $ 30%"
+    label = menubar.format_account_label(2, "Engineering", _USAGE, disabled=True)
+    assert label == "2  Engineering  (disabled)  5h 42% · 7d 18% · $ 30%"
 
 
 # --- usage logging -------------------------------------------------------------
@@ -279,49 +279,49 @@ def test_usage_log_key_ignores_clock_tracks_pct():
 
 def test_format_title_name_and_5h():
     s = menubar.MenuBarSettings(show_account_name=True, title_pct="5h")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s) == "⇄ loc · 42%"
+    assert menubar.format_title("Engineering", _USAGE, s) == "⇄ Engineering · 42%"
 
 
-def test_format_title_prefers_alias_over_local_part():
+def test_format_title_without_team_name():
     s = menubar.MenuBarSettings(show_account_name=True, title_pct="off")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s, alias="dev") == "⇄ dev"
+    assert menubar.format_title("", _USAGE, s) == "⇄ Personal"
 
 
 def test_format_title_name_only_when_pct_off():
     s = menubar.MenuBarSettings(show_account_name=True, title_pct="off")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s) == "⇄ loc"
+    assert menubar.format_title("Engineering", _USAGE, s) == "⇄ Engineering"
 
 
 def test_format_title_5h_only():
     s = menubar.MenuBarSettings(show_account_name=False, title_pct="5h")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s) == "⇄ 42%"
+    assert menubar.format_title("Engineering", _USAGE, s) == "⇄ 42%"
 
 
 def test_format_title_7d_only():
     s = menubar.MenuBarSettings(show_account_name=False, title_pct="7d")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s) == "⇄ 18%"
+    assert menubar.format_title("Engineering", _USAGE, s) == "⇄ 18%"
 
 
 def test_format_title_both_windows():
     s = menubar.MenuBarSettings(show_account_name=False, title_pct="both")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s) == "⇄ 42% · 18%"
+    assert menubar.format_title("Engineering", _USAGE, s) == "⇄ 42% · 18%"
 
 
 def test_format_title_both_windows_with_name():
     s = menubar.MenuBarSettings(show_account_name=True, title_pct="both")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s) == "⇄ loc · 42% · 18%"
+    assert menubar.format_title("Engineering", _USAGE, s) == "⇄ Engineering · 42% · 18%"
 
 
 def test_format_title_icon_only_when_off():
     s = menubar.MenuBarSettings(show_account_name=False, title_pct="off")
-    assert menubar.format_title("loc@papaya.asia", _USAGE, s) == "⇄"
+    assert menubar.format_title("Engineering", _USAGE, s) == "⇄"
 
 
 def test_format_title_scoped_appends_model_limits():
     # title_pct="off" + title_scoped gives a title tracking only the scoped model
     s = menubar.MenuBarSettings(show_account_name=True, title_pct="off", title_scoped=True)
     usage = {**_USAGE, "scoped": [{"name": "Fable", "pct": 55.0}]}
-    assert menubar.format_title("loc@papaya.asia", usage, s) == "⇄ loc · Fable 55%"
+    assert menubar.format_title("Engineering", usage, s) == "⇄ Engineering · Fable 55%"
 
 
 def test_format_title_scoped_after_windows_multiple_models():
@@ -330,7 +330,7 @@ def test_format_title_scoped_after_windows_multiple_models():
         **_USAGE,
         "scoped": [{"name": "Fable", "pct": 55.0}, {"name": "Opus", "pct": 7.0}],
     }
-    assert menubar.format_title("loc@papaya.asia", usage, s) == "⇄ 42% · 18% · Fable 55% · Opus 7%"
+    assert menubar.format_title("Engineering", usage, s) == "⇄ 42% · 18% · Fable 55% · Opus 7%"
 
 
 def test_format_title_scoped_off_by_default():
@@ -338,7 +338,7 @@ def test_format_title_scoped_off_by_default():
     s = menubar.MenuBarSettings(show_account_name=False, title_pct="off")
     usage = {**_USAGE, "scoped": [{"name": "Fable", "pct": 55.0}]}
     assert not s.title_scoped
-    assert menubar.format_title("loc@papaya.asia", usage, s) == "⇄"
+    assert menubar.format_title("Engineering", usage, s) == "⇄"
 
 
 def test_format_title_icon_only_when_no_active_account():
@@ -346,10 +346,10 @@ def test_format_title_icon_only_when_no_active_account():
     assert menubar.format_title(None, None, s) == "⇄"
 
 
-def test_format_title_truncates_long_local_part():
+def test_format_title_preserves_distinguishing_team_suffix():
     s = menubar.MenuBarSettings(show_account_name=True, title_pct="off")
-    title = menubar.format_title("averylonglocalpart@example.com", None, s)
-    assert title == "⇄ averylonglo*"  # 12 chars: 11 letters + asterisk marker
+    title = menubar.format_title("Claude Extended 4", None, s)
+    assert title == "⇄ Claude Extended 4"
 
 
 def test_format_title_both_drops_unavailable_windows():
@@ -418,9 +418,9 @@ _SWITCH_LOG = (
 
 
 def test_parse_switch_history_most_recent_first():
-    assert menubar.parse_switch_history(_SWITCH_LOG) == [
-        "3 → 1   2026-06-27 02:10",
-        "1 → 3   2026-06-27 00:57",
+    assert menubar.parse_switch_history(_SWITCH_LOG, team_names={"1": "Engineering", "3": "Extended"}) == [
+        "Extended → Engineering   2026-06-27 02:10",
+        "Engineering → Extended   2026-06-27 00:57",
     ]
 
 
@@ -449,13 +449,15 @@ class _FakeEntry:
 
 
 class _FakeAcct:
-    def __init__(self, number, email, is_active, usage, alias="", disabled=False):
+    def __init__(self, number, email, is_active, usage, alias="", disabled=False, org_name="", org_uuid=""):
         self.number = number
         self.email = email
         self.is_active = is_active
         self.usage = usage
         self.alias = alias
         self.disabled = disabled
+        self.org_name = org_name
+        self.org_uuid = org_uuid
 
 
 class _FakeSnap:
@@ -477,18 +479,20 @@ def test_adapt_snapshot_shape_and_active_selection():
     # pacing now lives in SnapshotSource, tested separately).
     lg = {"five_hour": {"pct": 10.0}, "seven_day": {"pct": 20.0}}
     accts = [
-        _FakeAcct("1", "a@x.com", True, _FakeEntry(last_good=lg, fetched_at=123.0)),
-        _FakeAcct("2", "b@x.com", False, _FakeEntry(sentinel=USAGE_API_KEY), disabled=True),
+        _FakeAcct("1", "a@x.com", True, _FakeEntry(last_good=lg, fetched_at=123.0), alias="private-alias", org_name="Team One", org_uuid="org-1"),
+        _FakeAcct("2", "a@x.com", False, _FakeEntry(sentinel=USAGE_API_KEY), disabled=True, org_name="Team Two", org_uuid="org-2"),
     ]
     snap = menubar._adapt_snapshot(_FakeSnap(accts))
     assert snap["active_email"] == "a@x.com"
     assert snap["active_usage"] == lg
-    assert snap["active_alias"] == ""
-    # (num, email, is_active, display_usage, last_good, alias, disabled, fetched_at)
-    assert snap["accounts"][0] == ("1", "a@x.com", True, lg, lg, "", False, 123.0)
+    assert snap["active_team"] == "Team One"
+    assert snap["active_identity"] == ("a@x.com", "org-1")
+    assert snap["active_identity"] != ("a@x.com", "org-2")
+    # (num, email, is_active, display_usage, last_good, team_name, disabled, fetched_at)
+    assert snap["accounts"][0] == ("1", "a@x.com", True, lg, lg, "Team One", False, 123.0)
     # sentinel account: display is the human note, last_good/fetched_at are None; disabled carried through
     assert snap["accounts"][1] == (
-        "2", "b@x.com", False, menubar.SENTINEL_NOTES[USAGE_API_KEY], None, "", True, None,
+        "2", "a@x.com", False, menubar.SENTINEL_NOTES[USAGE_API_KEY], None, "Team Two", True, None,
     )
 
 

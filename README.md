@@ -11,6 +11,12 @@ settings and auto-switch state. On macOS both the active credential and stored
 account backups have their own Keychain namespaces. Desktop's default login,
 account state and account backups are not migrated.
 
+The menu bar identifies each managed login by its Team name instead of its
+account email or alias, including the active title, usage rows, management
+menus, switch notifications and history. Personal logins without a Team name
+are labeled `Personal`. Switching Teams under the same email refreshes the
+active title and checkmark as well.
+
 ```bash
 uv tool install --force --with rumps \
   'git+https://github.com/kunyang-meshy/claude-swap@codex/cli-desktop-isolation'

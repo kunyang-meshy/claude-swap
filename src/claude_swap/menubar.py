@@ -277,42 +277,36 @@ def usage_summary(
 
 def format_account_label(
     num,
-    email: str,
+    team_name: str | None,
     usage: dict | str | None,
     now: float | None = None,
-    alias: str | None = None,
     disabled: bool = False,
     fetched_at: float | None = None,
 ) -> str:
-    """Build one account row's menu label."""
-    label = f"{alias}  ({email})" if alias else email
+    """Identify a managed login by Team, without exposing the account email."""
+    label = _team_name(team_name)
     marker = "  (disabled)" if disabled else ""
     return f"{num}  {label}{marker}  {usage_summary(usage, now, fetched_at)}"
 
 
-def _local_part(email: str, limit: int = 12) -> str:
-    """Email text before '@', truncated with a trailing '*' marker."""
-    local = email.split("@", 1)[0]
-    if len(local) > limit:
-        return local[: limit - 1] + "*"
-    return local
+def _team_name(name: str | None) -> str:
+    return name.strip() if name and name.strip() else "Personal"
 
 
 def format_title(
-    active_email: str | None,
+    active_team: str | None,
     active_usage: dict | str | None,
     settings: MenuBarSettings,
     now: float | None = None,
-    alias: str | None = None,
 ) -> str:
-    """Build the menu-bar title from the active account and settings."""
-    if active_email is None:
+    """Build the menu-bar title from the active Team and settings."""
+    if active_team is None:
         return ICON
     if now is None:
         now = time.time()
     segments: list[str] = []
     if settings.show_account_name:
-        segments.append(alias if alias else _local_part(active_email))
+        segments.append(_team_name(active_team))
     if settings.title_pct in ("5h", "both"):
         p = _window_pct(active_usage, "five_hour")
         if p is not None:
@@ -371,7 +365,10 @@ def _usage_log_key(usage: dict | str | None) -> tuple[float | None, float | None
 _SWITCH_LOG_RE = re.compile(r"Switched from account (\d+) to (\d+)")
 
 
-def parse_switch_history(log_text: str, limit: int = SWITCH_HISTORY_LIMIT) -> list[str]:
+def parse_switch_history(
+    log_text: str, limit: int = SWITCH_HISTORY_LIMIT,
+    team_names: dict[str, str] | None = None,
+) -> list[str]:
     """Recent account switches from the log, most-recent first.
 
     Reads the ``Switched from account X to Y`` lines the switcher logs and pairs
@@ -384,7 +381,11 @@ def parse_switch_history(log_text: str, limit: int = SWITCH_HISTORY_LIMIT) -> li
         if not m:
             continue
         stamp = line.split(" - ", 1)[0].strip()[:16]  # "YYYY-MM-DD HH:MM"
-        out.append(f"{m.group(1)} → {m.group(2)}   {stamp}")
+        source, target = m.group(1), m.group(2)
+        if team_names is not None:
+            source = team_names.get(source, f"Team {source}")
+            target = team_names.get(target, f"Team {target}")
+        out.append(f"{source} → {target}   {stamp}")
     return out[-limit:][::-1]
 
 
@@ -404,16 +405,18 @@ EMPTY_SNAPSHOT: dict = {
     "accounts": [],
     "active_email": None,
     "active_usage": None,
-    "active_alias": None,
+    "active_team": None,
+    "active_identity": None,
 }
 
 
 def _adapt_snapshot(snap) -> dict:
     """Adapt an ``AccountsSnapshot`` to the menu bar's render dict.
 
-    Shape: ``{"accounts": [(num, email, is_active, display_usage, last_good, alias, disabled, fetched_at), ...],
+    Shape: ``{"accounts": [(num, email, is_active, display_usage, last_good, team_name, disabled, fetched_at), ...],
     "active_email": str | None, "active_usage": dict | str | None,
-    "active_alias": str | None}``. The snapshot itself is produced by
+    "active_team": str | None, "active_identity": (email, org_uuid) | None}``.
+    The snapshot itself is produced by
     ``SnapshotSource`` (the paced read path), so this is a pure transform — no
     fetching, no I/O. Per-account ``fetched_at`` is the underlying
     measurement's fetch time, used only for the pace marker (issue #125).
@@ -421,22 +424,25 @@ def _adapt_snapshot(snap) -> dict:
     accounts = []
     active_email = None
     active_usage = None
-    active_alias = None
+    active_team = None
+    active_identity = None
     for acc in snap.accounts:
         display = _account_display_usage(acc.usage)
         accounts.append(
             (
                 acc.number, acc.email, acc.is_active, display, acc.usage.last_good,
-                acc.alias, acc.disabled, acc.usage.fetched_at,
+                acc.org_name, acc.disabled, acc.usage.fetched_at,
             )
         )
         if acc.is_active:
-            active_email, active_usage, active_alias = acc.email, display, acc.alias
+            active_email, active_usage, active_team = acc.email, display, acc.org_name
+            active_identity = (acc.email, acc.org_uuid)
     return {
         "accounts": accounts,
         "active_email": active_email,
         "active_usage": active_usage,
-        "active_alias": active_alias,
+        "active_team": active_team,
+        "active_identity": active_identity,
     }
 
 
@@ -624,7 +630,7 @@ def run(switcher) -> int:
             but de-dupes per account on the (5h, 7d) percentages so an idle
             machine doesn't churn the rotating log with identical lines.
             """
-            for num, email, _is_active, _display, last_good, _alias, _disabled, _fetched_at in snap["accounts"]:
+            for num, email, _is_active, _display, last_good, _team, _disabled, _fetched_at in snap["accounts"]:
                 key = _usage_log_key(last_good)
                 if key == (None, None) or self._last_usage_log.get(num) == key:
                     continue
@@ -649,7 +655,7 @@ def run(switcher) -> int:
             # read of ~/.claude.json -- no Keychain or usage API -- so we can do
             # it on every tick. We gate the read on the file's mtime (a cheap
             # stat) so a large config isn't parsed each second, and only kick a
-            # refresh when the active email actually changed (Claude Code rewrites
+            # refresh when the active email or Team changed (Claude Code rewrites
             # this file often for unrelated reasons).
             if self._refreshing:
                 return  # a worker is already in-flight; it refreshes the marker
@@ -661,8 +667,7 @@ def run(switcher) -> int:
                 return
             self._config_mtime = mtime
             current = self.switcher._get_current_account()
-            email = current[0] if current else None
-            if email and email != self.snapshot.get("active_email"):
+            if current and current != self.snapshot.get("active_identity"):
                 self.refresh_async()
 
         # ---- auto-switch engine ----------------------------------------------
@@ -712,12 +717,17 @@ def run(switcher) -> int:
                 events, self._engine_events = self._engine_events, []
             for ev in events:
                 if ev.kind == "switch" and not getattr(ev, "dry_run", False):
-                    rumps.notification("claude-swap", "Auto-switched account", ev.human())
+                    source = self._team_for_slot((ev.from_ref or {}).get("number"))
+                    target = self._team_for_slot((ev.to_ref or {}).get("number"))
+                    rumps.notification("claude-swap", "Auto-switched Team", f"{source} → {target}")
                     self.refresh_async()  # reflect the switch promptly
                 elif ev.kind == "account-quarantined":
-                    rumps.notification("claude-swap", "Account quarantined", ev.human())
+                    rumps.notification(
+                        "claude-swap", "Team needs login",
+                        f"{self._team_for_slot(ev.number)}: {ev.reason}",
+                    )
                 elif ev.kind == "all-exhausted":
-                    rumps.notification("claude-swap", "All accounts exhausted", ev.human())
+                    rumps.notification("claude-swap", "All Teams exhausted", ev.human())
                 elif ev.kind == "config-warning":
                     # e.g. an autoswitch.model name no account reports — the
                     # engine emits it once per run; dropping it would leave a
@@ -732,12 +742,17 @@ def run(switcher) -> int:
                 return 0
 
         # ---- menu construction -----------------------------------------------
+        def _team_for_slot(self, num):
+            for row in self.snapshot["accounts"]:
+                if str(row[0]) == str(num):
+                    return _team_name(row[5])
+            return f"Team {num}" if num is not None else "Unknown Team"
+
         def rebuild_menu(self):
             self.title = format_title(
-                self.snapshot["active_email"],
+                self.snapshot["active_team"],
                 self.snapshot["active_usage"],
                 self.settings,
-                alias=self.snapshot.get("active_alias"),
             )
             # Stop a rumps memory leak: rumps registers each menu item's callback
             # in the process-global NSApp._ns_to_py_and_callback, but Menu.clear()
@@ -760,17 +775,17 @@ def run(switcher) -> int:
                 _purge(self.menu._menu)
             self.menu.clear()
             account_items = []
-            for num, email, is_active, display, _last_good, alias, disabled, fetched_at in self.snapshot["accounts"]:
+            for num, _email, is_active, display, _last_good, team_name, disabled, fetched_at in self.snapshot["accounts"]:
                 item = rumps.MenuItem(
                     format_account_label(
-                        num, email, display, alias=alias, disabled=disabled, fetched_at=fetched_at
+                        num, team_name, display, disabled=disabled, fetched_at=fetched_at
                     ),
                     callback=self._make_switch_to(num),
                 )
                 item.state = 1 if is_active else 0
                 account_items.append(item)
             if not account_items:
-                account_items.append(rumps.MenuItem("No managed accounts", callback=None))
+                account_items.append(rumps.MenuItem("No managed Teams", callback=None))
 
             self.menu = [
                 *account_items,
@@ -791,29 +806,29 @@ def run(switcher) -> int:
             ]
 
         def _add_menu(self, rumps):
-            menu = rumps.MenuItem("Add account")
+            menu = rumps.MenuItem("Add Team")
             menu.add(rumps.MenuItem("From current login", callback=self.on_add_login))
             if hasattr(self.switcher, "add_account_from_token"):
                 menu.add(rumps.MenuItem("From setup-token…", callback=self.on_add_token))
             return menu
 
         def _remove_menu(self, rumps):
-            menu = rumps.MenuItem("Remove account")
+            menu = rumps.MenuItem("Remove Team")
             accounts = self.snapshot["accounts"]
             if not accounts:
-                menu.add(rumps.MenuItem("No managed accounts", callback=None))
-            for num, email, _is_active, _display, _last_good, alias, _disabled, _fetched_at in accounts:
-                label = f"{num}  {alias}  ({email})" if alias else f"{num}  {email}"
+                menu.add(rumps.MenuItem("No managed Teams", callback=None))
+            for num, _email, _is_active, _display, _last_good, team_name, _disabled, _fetched_at in accounts:
+                label = f"{num}  {_team_name(team_name)}"
                 menu.add(rumps.MenuItem(label, callback=self._make_remove(num)))
             return menu
 
         def _disable_menu(self, rumps):
-            menu = rumps.MenuItem("Disable / enable account")
+            menu = rumps.MenuItem("Disable / enable Team")
             accounts = self.snapshot["accounts"]
             if not accounts:
-                menu.add(rumps.MenuItem("No managed accounts", callback=None))
-            for num, email, _is_active, _display, _last_good, alias, disabled, _fetched_at in accounts:
-                name = f"{alias}  ({email})" if alias else email
+                menu.add(rumps.MenuItem("No managed Teams", callback=None))
+            for num, _email, _is_active, _display, _last_good, team_name, disabled, _fetched_at in accounts:
+                name = _team_name(team_name)
                 item = rumps.MenuItem(
                     f"{num}  {name}", callback=self._make_toggle_disabled(num, disabled)
                 )
@@ -829,7 +844,9 @@ def run(switcher) -> int:
                 text = log_path.read_text(encoding="utf-8")
             except OSError:
                 text = ""
-            entries = parse_switch_history(text)
+            entries = parse_switch_history(
+                text, team_names={str(row[0]): _team_name(row[5]) for row in self.snapshot["accounts"]},
+            )
             if entries:
                 for line in entries:
                     menu.add(rumps.MenuItem(line, callback=None))
@@ -841,7 +858,7 @@ def run(switcher) -> int:
 
         def _settings_menu(self, rumps):
             menu = rumps.MenuItem("Settings")
-            name_item = rumps.MenuItem("Show account name in menu bar", callback=self.on_toggle_name)
+            name_item = rumps.MenuItem("Show Team name in menu bar", callback=self.on_toggle_name)
             name_item.state = 1 if self.settings.show_account_name else 0
             menu.add(name_item)
 
@@ -899,7 +916,7 @@ def run(switcher) -> int:
         def _notify_switched(self):
             rumps.notification(
                 "claude-swap",
-                "Account switched",
+                "Team switched",
                 "Switch takes effect within ~30s — restart Claude Code to apply immediately.",
             )
 
@@ -920,8 +937,8 @@ def run(switcher) -> int:
         def _make_remove(self, num):
             def cb(_sender):
                 if rumps.alert(
-                    title="Remove account",
-                    message=f"Remove account {num}?",
+                    title="Remove Team",
+                    message=f"Remove {self._team_for_slot(num)} from claude-swap?",
                     ok="Remove",
                     cancel="Cancel",
                 ) == 1:  # 1 == OK
