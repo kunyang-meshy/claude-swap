@@ -1934,6 +1934,12 @@ class ClaudeAccountSwitcher:
         the no-backup direct-activation path). Use :meth:`has_live_login` to
         tell the two ``None`` cases apart.
         """
+        from claude_swap.cli_profile import enabled as cli_only
+
+        if cli_only():
+            from claude_swap.cli_identity import current_slot
+
+            return current_slot(self, self._get_sequence_data() or {})
         identity = self._get_current_account()
         if identity is None:
             return None
@@ -2994,6 +3000,15 @@ class ClaudeAccountSwitcher:
         — nothing there is its to adopt, consume, or overwrite. Compares the
         organization too: two managed slots may share an email across orgs.
         """
+        from claude_swap.cli_profile import enabled as cli_only
+
+        if cli_only():
+            from claude_swap.cli_identity import matching_slots
+
+            data = self._get_sequence_data() or {}
+            slot = self._find_account_slot(data, email, org_uuid or "")
+            matches = matching_slots(self, data, self._read_credentials())
+            return slot is not None and matches == [slot]
         identity = self._get_current_account()
         return identity is not None and identity == (email, org_uuid or "")
 
@@ -4047,6 +4062,12 @@ class ClaudeAccountSwitcher:
             current_email, current_org_uuid = current_identity
             active_num = self._find_account_slot(data, current_email, current_org_uuid)
 
+        from claude_swap.cli_profile import enabled as cli_only
+        if cli_only():
+            from claude_swap.cli_identity import current_slot
+
+            active_num = current_slot(self, data)
+
         accounts_info: list[tuple[int, str, str, str, bool, str, str]] = []
         # Reset each build; set below only when the active slot's OAuth Keychain
         # read failed with no fallback. Read by _static_usage_sentinel (main
@@ -4110,6 +4131,17 @@ class ClaudeAccountSwitcher:
           the token endpoint rejects its reuse (verified: invalid_grant on
           re-presentation, siblings unaffected).
         """
+        from claude_swap.cli_profile import enabled as cli_only
+        if cli_only():
+            from claude_swap.cli_identity import matching_slots
+
+            # Do not use stale oauthAccount metadata to serve another Team's
+            # quota or restore its backup over the actual login. The locked
+            # identity check below repeats this proof against the live store.
+            matches = matching_slots(self, self._get_sequence_data() or {}, creds)
+            if matches != [account_num]:
+                return FetchRecord(sentinel=USAGE_FOREIGN_CREDENTIAL)
+
         oauth_data = oauth.extract_oauth_data(creds)
         if not oauth_data or not oauth_data.get("accessToken"):
             return FetchRecord(sentinel=USAGE_NO_CREDENTIALS)
@@ -6481,6 +6513,21 @@ class ClaudeAccountSwitcher:
           endpoint state must never change switch behavior beyond skipping
           the extra safety.
         """
+        from claude_swap.cli_profile import enabled as cli_only
+        if cli_only():
+            from claude_swap.cli_identity import matching_slots
+
+            matches = matching_slots(self, data, original_creds)
+            if len(matches) == 1 and matches[0] != current_account:
+                # A stale config is not permission to capture another Team's
+                # token, even when the network ownership probe is unavailable.
+                owner = matches[0]
+                saved = self._read_account_credentials(owner, data["accounts"][owner]["email"])
+                synced = bool(saved) and (
+                    saved == original_creds or oauth.credential_fingerprint(saved)
+                    == oauth.credential_fingerprint(original_creds)
+                )
+                return ("foreign-synced" if synced else "foreign", owner)
         backup = self._read_account_credentials(current_account, current_email)
         if backup and backup == original_creds:
             return ("own-bytes", None)
@@ -7014,10 +7061,19 @@ class ClaudeAccountSwitcher:
             except PermissionError:
                 raise ConfigError("Permission denied reading Claude config")
 
+            from claude_swap.cli_profile import enabled as cli_only
+            if cli_only():
+                from claude_swap.cli_identity import matching_slots
+
+                matches = matching_slots(self, data, original_creds)
+                if len(matches) == 1:
+                    owner = matches[0]
+                    from_ref = account_ref(int(owner), data["accounts"][owner]["email"])
+
             transaction = SwitchTransaction(
                 original_credentials=original_creds,
                 original_config=original_config,
-                original_account_num=current_account,
+                original_account_num=str(from_ref["number"]),
                 original_email=current_email,
                 config_path=config_path,
             )
@@ -7215,7 +7271,7 @@ class ClaudeAccountSwitcher:
                 transaction.record_step("sequence_updated")
 
                 self._logger.info(
-                    f"Switched from account {current_account} to {target_account}"
+                    f"Switched from account {from_ref['number']} to {target_account}"
                 )
 
             except Exception as e:
@@ -7267,6 +7323,13 @@ class ClaudeAccountSwitcher:
         The file line also covers macOS when the Keychain was unavailable and the
         switch fell back to the file.
         """
+        from claude_swap.cli_profile import enabled as cli_only
+        if cli_only():
+            print(dimmed(
+                "New CLI sessions use this Team. If an existing session keeps "
+                "the old Team, exit it and run claude-cli --resume."
+            ))
+            return
         backend = self._last_active_credentials_backend
         if backend is None:
             # No write happened this run; fall back to the routing hint.

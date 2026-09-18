@@ -17,6 +17,18 @@ menus, switch notifications and history. Personal logins without a Team name
 are labeled `Personal`. Switching Teams under the same email refreshes the
 active title and checkmark as well.
 
+The active CLI Team is verified against the credential store. An old session
+writing stale Team metadata into `.claude.json` cannot change the menu's active
+Team or make the auto engine evaluate that old Team's quota. If the credential's
+owner cannot be verified, automatic switching holds. Usage refresh also refuses
+to restore a different Team's backup over the live login. Menu selections,
+automatic decisions and metadata drift are recorded separately in the log.
+
+Already-running CLI processes can retain their previous login state. If one
+still reports the old Team after a switch, exit that session when convenient
+and resume it with `claude --resume` (using the alias below) or
+`claude-cli --resume`. Swap does not terminate running sessions.
+
 ```bash
 uv tool install --force --with rumps \
   'git+https://github.com/kunyang-meshy/claude-swap@codex/cli-desktop-isolation'

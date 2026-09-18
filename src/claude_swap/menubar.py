@@ -583,6 +583,7 @@ def run(switcher) -> int:
             self._engine = None
             self._engine_events: list = []
             self._event_lock = threading.Lock()
+            self._last_engine_decision = None
             self.rebuild_menu()
             # Background display refresh on the user's interval, plus a fast
             # UI-sync tick that applies snapshots + engine events on the main thread.
@@ -709,6 +710,21 @@ def run(switcher) -> int:
         def _on_engine_event(self, event):
             # Runs on the engine thread; must not raise. Queue for the main
             # thread, which surfaces notifications and reacts on the sync tick.
+            if event.kind == "switch":
+                self.switcher._logger.info(
+                    "Automatic Team switch: trigger=%s from=%s to=%s",
+                    event.trigger, (event.from_ref or {}).get("number"),
+                    (event.to_ref or {}).get("number"),
+                )
+            elif event.kind == "no-switch":
+                decision = (event.reason, event.detail)
+                if decision != self._last_engine_decision:
+                    self.switcher._logger.info(
+                        "Automatic switch held: reason=%s detail=%s", *decision,
+                    )
+                self._last_engine_decision = decision
+            elif event.kind == "error":
+                self.switcher._logger.warning("Automatic switch error: %s", event.message)
             with self._event_lock:
                 self._engine_events.append(event)
 
@@ -917,11 +933,12 @@ def run(switcher) -> int:
             rumps.notification(
                 "claude-swap",
                 "Team switched",
-                "Switch takes effect within ~30s — restart Claude Code to apply immediately.",
+                "New CLI sessions use this Team. If an existing session keeps the old Team, restart it with --resume.",
             )
 
         def _make_switch_to(self, num):
             def cb(_sender):
+                self.switcher._logger.info("Menu Team selection requested: target=%s", num)
                 if self._guard(lambda: self.switcher.switch_to(str(num))):
                     self._notify_switched()
                     self.refresh_async()
@@ -929,6 +946,7 @@ def run(switcher) -> int:
 
         def _switch(self, strategy):
             def cb(_sender):
+                self.switcher._logger.info("Menu rotation requested: strategy=%s", strategy)
                 if self._guard(lambda: self.switcher.switch(strategy=strategy)):
                     self._notify_switched()
                     self.refresh_async()
