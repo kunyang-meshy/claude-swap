@@ -572,6 +572,17 @@ class TestBuildTokenStatus:
 
         assert status == "oauth: unknown expiry, refresh token yes"
 
+    @pytest.mark.parametrize("seconds,state", [(240, "refresh due"),
+        (-60, "expired, automatic refresh pending")])
+    def test_refresh_window_does_not_claim_login_required(self, seconds, state):
+        credentials = json.dumps({"claudeAiOauth": {
+            "accessToken": "test-access", "refreshToken": "test-refresh",
+            "expiresAt": (datetime.now(timezone.utc).timestamp() + seconds) * 1000,
+        }})
+        status = oauth.build_token_status(credentials)
+        assert f"oauth: {state}," in status
+        assert "login required" not in status
+
 
 class TestFetchUsageForAccount:
     """Test refresh-aware usage fetches for managed accounts."""

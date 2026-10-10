@@ -3138,7 +3138,7 @@ class TestActiveAccountRefresh:
             lock.rmdir()
 
         output = capsys.readouterr().out
-        assert "token expired" in output
+        assert "automatic refresh pending" in output
 
     def test_expired_active_is_no_longer_statically_gated(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
@@ -10147,7 +10147,11 @@ class TestStrikeUnbindsInCollector:
         # replace the credential (fresh lineage) — quarantine must lift
         fresh = json.dumps({
             "claudeAiOauth": {"accessToken": "b", "refreshToken": "rt-new",
-                              "expiresAt": 1000}})
+                              "expiresAt": 9999999999000}})
+        monkeypatch.setattr(
+            oauth, "try_refresh_oauth_credentials",
+            lambda *_args, **_kwargs: pytest.fail("fresh replacement must not refresh"),
+        )
         s._write_account_credentials("2", "b@example.com", fresh)
         info = [(2, "b@example.com", "", "", False, fresh, "")]
         entries = s._collect_usage_entries(info, fetch=set())

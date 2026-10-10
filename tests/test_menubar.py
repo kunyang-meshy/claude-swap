@@ -474,6 +474,17 @@ def test_account_display_usage_sentinel_note_last_good_or_none():
     assert menubar._account_display_usage(_FakeEntry()) is None
 
 
+def test_pending_renewal_is_quiet_but_keeps_decision_sentinel():
+    from claude_swap.json_output import USAGE_RELOGIN_REQUIRED, USAGE_TOKEN_EXPIRED
+    lg = {"five_hour": {"pct": 12.0}}
+    entry = _FakeEntry(sentinel=USAGE_TOKEN_EXPIRED, last_good=lg)
+    assert menubar._account_display_usage(entry) == lg
+    assert entry.sentinel == USAGE_TOKEN_EXPIRED
+    assert menubar._account_display_usage(
+        _FakeEntry(sentinel=USAGE_RELOGIN_REQUIRED, last_good=lg)
+    ) == menubar.SENTINEL_NOTES[USAGE_RELOGIN_REQUIRED]
+
+
 def test_adapt_snapshot_shape_and_active_selection():
     # _adapt_snapshot is a pure transform of an AccountsSnapshot (the fetch
     # pacing now lives in SnapshotSource, tested separately).

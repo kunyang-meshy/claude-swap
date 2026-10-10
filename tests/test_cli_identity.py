@@ -8,11 +8,13 @@ import pytest
 
 from claude_swap import cli_profile, oauth
 from claude_swap.autoswitch import AutoSwitchEngine, TickOutcome
-from claude_swap.json_output import USAGE_FOREIGN_CREDENTIAL
+from claude_swap.json_output import (
+    USAGE_FOREIGN_CREDENTIAL, USAGE_RELOGIN_REQUIRED, USAGE_TOKEN_EXPIRED,
+)
 from claude_swap.models import Platform
 from claude_swap.settings import AutoSwitchSettings
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.usage_store import UsageEntry
+from claude_swap.usage_store import FetchRecord, UsageEntry
 
 
 def credential(number, expires=9999999999000):
@@ -203,3 +205,122 @@ def test_verified_rotation_is_not_mistaken_for_an_already_saved_backup(cli, monk
     assert cli._classify_outgoing_credential(
         "6", "same@example.com", live, {"resolved": None}, cli._get_sequence_data(),
     ) == ("foreign", "2")  # Preserve the unsaved rotation before switching.
+
+
+def park_quota_polls(cli):
+    infos = cli._build_accounts_info()
+    identities = {str(i[0]): (i[1], i[3]) for i in infos}
+    store = cli._usage_store
+    now = store.clock()
+    store.record({n: FetchRecord(usage={"five_hour": {"pct": 10.0}})
+                  for n in identities}, identities)
+    store.set_poll_plan({n: (now + 600, 600) for n in identities}, identities)
+    return infos, identities
+
+
+def no_quota_request(monkeypatch):
+    monkeypatch.setattr(oauth, "try_fetch_usage_for_account",
+                        Mock(side_effect=AssertionError("quota poll must wait")))
+
+
+def test_near_expiry_active_renews_despite_fresh_quota_and_future_plan(cli, monkeypatch):
+    from claude_swap.claude_locks import credentials_lock_dir, oauth_refresh_lock_dir
+    old = credential("2", int((time.time() + 240) * 1000))
+    new = credential("rotated-2")
+    cli._write_credentials(old)
+    cli._write_account_credentials("2", "same@example.com", old)
+    infos, identities = park_quota_polls(cli)
+    before = cli._usage_store.entries(identities)["2"]
+    no_quota_request(monkeypatch)
+
+    def renew(creds, **kwargs):
+        assert creds == old
+        assert oauth_refresh_lock_dir().is_dir()
+        assert credentials_lock_dir().is_dir()
+        return oauth.RefreshOutcome(new, None)
+
+    post = Mock(side_effect=renew)
+    monkeypatch.setattr(oauth, "try_refresh_oauth_credentials", post)
+    entries = cli._collect_usage_entries(infos, fetch=set(), scheduled=True)
+    post.assert_called_once()
+    assert cli._read_credentials() == new
+    assert cli._read_account_credentials("2", "same@example.com") == new
+    assert cli.current_account_number() == "2"
+    assert entries["2"].fetched_at == before.fetched_at
+    assert entries["2"].next_poll_at == before.next_poll_at
+    assert entries["2"].last_good == before.last_good
+    assert entries["2"].sentinel is None
+
+
+def test_idle_team_renews_even_when_scheduler_did_not_request_it(cli, monkeypatch):
+    old = credential("6", 1)
+    new = credential("rotated-6")
+    live = cli._read_credentials()
+    cli._write_account_credentials("6", "same@example.com", old)
+    infos, identities = park_quota_polls(cli)
+    before = cli._usage_store.entries(identities)["6"]
+    no_quota_request(monkeypatch)
+    post = Mock(return_value=oauth.RefreshOutcome(new, None))
+    monkeypatch.setattr(oauth, "try_refresh_oauth_credentials", post)
+    entries = cli._collect_usage_entries(infos, fetch=set(), scheduled=True)
+    post.assert_called_once_with(old)
+    assert cli._read_account_credentials("6", "same@example.com") == new
+    assert cli._read_credentials() == live
+    assert entries["6"].fetched_at == before.fetched_at
+    assert entries["6"].sentinel is None
+
+
+@pytest.mark.parametrize("error,needs_login", [("transient", False), ("invalid_grant", True)])
+def test_renewal_only_prompts_for_permanent_auth_failure(cli, monkeypatch, error, needs_login):
+    old = credential("2", 1)
+    cli._write_credentials(old)
+    cli._write_account_credentials("2", "same@example.com", old)
+    infos, identities = park_quota_polls(cli)
+    no_quota_request(monkeypatch)
+    post = Mock(return_value=oauth.RefreshOutcome(None, error))
+    monkeypatch.setattr(oauth, "try_refresh_oauth_credentials", post)
+    entries = cli._collect_usage_entries(infos, fetch=set())
+    assert (entries["2"].sentinel == USAGE_RELOGIN_REQUIRED) is needs_login
+    assert cli._read_credentials() == old
+    cli._collect_usage_entries(infos, fetch=set())
+    post.assert_called_once()  # failure backoff or quarantine paces retries
+    assert cli._usage_store.entries(identities)["2"].token_dead() is needs_login
+
+
+def test_fresh_verified_live_rotation_heals_condemned_backup_before_login_prompt(cli, monkeypatch):
+    old = cli._read_credentials()
+    _, identities = park_quota_polls(cli)
+    cli._usage_store.record({"2": FetchRecord(error="invalid_grant",
+        struck_fp=oauth.credential_fingerprint(old))}, identities)
+    new = credential("new-live-2")
+    cli._write_credentials(new)
+    monkeypatch.setattr(oauth, "fetch_oauth_profile", lambda token: {
+        "uuid": "same-user", "email": "same@example.com", "organizationUuid": "org-2",
+    })
+    no_quota_request(monkeypatch)
+    entries = cli._collect_usage_entries(cli._build_accounts_info(), fetch=set())
+    assert entries["2"].sentinel != USAGE_RELOGIN_REQUIRED
+    assert cli._read_account_credentials("2", "same@example.com") == new
+    assert not cli._usage_store.entries(identities)["2"].token_dead()
+
+
+def test_locked_active_renewal_is_pending_without_login_or_switch(cli, monkeypatch):
+    from claude_swap.claude_locks import oauth_refresh_lock_dir
+    old = credential("2", 1)
+    cli._write_credentials(old)
+    cli._write_account_credentials("2", "same@example.com", old)
+    infos, identities = park_quota_polls(cli)
+    no_quota_request(monkeypatch)
+    post = Mock(side_effect=AssertionError("must not consume under another lock"))
+    monkeypatch.setattr(oauth, "try_refresh_oauth_credentials", post)
+    monkeypatch.setattr("claude_swap.claude_locks.DEFAULT_TIMEOUT_S", 0.05)
+    lock = oauth_refresh_lock_dir()
+    lock.mkdir()
+    try:
+        entries = cli._collect_usage_entries(infos, fetch=set())
+    finally:
+        lock.rmdir()
+    assert entries["2"].sentinel == USAGE_TOKEN_EXPIRED
+    assert not cli._usage_store.entries(identities)["2"].token_dead()
+    assert cli._read_credentials() == old
+    post.assert_not_called()

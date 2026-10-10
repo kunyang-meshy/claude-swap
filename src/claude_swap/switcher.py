@@ -198,7 +198,7 @@ ERROR_NOTES = {
 }
 
 SENTINEL_NOTES = {
-    USAGE_TOKEN_EXPIRED: "token expired — refresh deferred this pass; retries automatically",
+    USAGE_TOKEN_EXPIRED: "automatic refresh pending — retries automatically",
     USAGE_FOREIGN_CREDENTIAL: "live credential belongs to another account — a switch repairs it",
     USAGE_API_KEY: "API key (no quota)",
     USAGE_KEYCHAIN_UNAVAILABLE: "keychain unavailable — locked or in use; try again",
@@ -4092,7 +4092,8 @@ class ClaudeAccountSwitcher:
         return accounts_info
 
     def _fetch_active_usage(
-        self, account_num: str, email: str, creds: str, org_uuid: str = ""
+        self, account_num: str, email: str, creds: str, org_uuid: str = "",
+        *, refresh_only: bool = False,
     ) -> FetchRecord:
         """Usage fetch for the active/default account, refreshing an expired
         token under Claude Code's own lock protocol.
@@ -4169,6 +4170,8 @@ class ClaudeAccountSwitcher:
         # one wins, the loser gets invalid_grant and strikes a live account.
         force_refresh: FetchRecord | None = None
         if not oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+            if refresh_only:
+                return FetchRecord(credential_refreshed=True)
             outcome = oauth.try_fetch_usage_for_account(
                 account_num, email, creds, is_active=True,
             )
@@ -4652,6 +4655,8 @@ class ClaudeAccountSwitcher:
             )
             return _defer(force_refresh)
 
+        if refresh_only:
+            return FetchRecord(credential_refreshed=True)
         outcome = oauth.try_fetch_usage_for_account(
             account_num, email, working, is_active=True,
         )
@@ -4954,10 +4959,32 @@ class ClaudeAccountSwitcher:
             retry_after_s=outcome.retry_after_s,
         )
 
+    def _refresh_due_credential(self, info: tuple) -> FetchRecord:
+        """Renew authentication without fetching quota or relabeling its age."""
+        num, email, _org_name, org_uuid, active, creds, _alias = info
+        num = str(num)
+        if active:
+            return self._fetch_active_usage(
+                num, email, creds, org_uuid, refresh_only=True,
+            )
+        if self._live_session_pids(num, email):
+            return FetchRecord(sentinel=USAGE_TOKEN_EXPIRED)
+        result = self.consume_backup_grant(num, email, creds)
+        if result.credentials and result.error is None:
+            return FetchRecord(credential_refreshed=True)
+        dead = result.error in ("invalid_grant", "no_refresh_token")
+        return FetchRecord(
+            error=(result.error if dead or result.error in
+                   oauth._DETERMINISTIC_REFRESH_ERRORS else "refresh-failed"),
+            struck_fp=(result.consumed_fp or oauth.credential_fingerprint(creds))
+            if dead else None,
+        )
+
     def _run_usage_fetches(
         self,
         infos: list[tuple[int, str, str, str, bool, str, str]],
         entries: dict[str, UsageEntry] | None = None,
+        refresh_due: set[str] | None = None,
     ) -> dict[str, FetchRecord]:
         """Fetch the given accounts in parallel, staggering request starts so
         N accounts never hit the endpoint in the same instant. ``entries``
@@ -4969,6 +4996,8 @@ class ClaudeAccountSwitcher:
             if idx and _FETCH_STAGGER_S:
                 time.sleep(idx * _FETCH_STAGGER_S)
             num = str(info[0])
+            if refresh_due and num in refresh_due:
+                return num, self._refresh_due_credential(info)
             entry = entries.get(num) if entries else None
             return num, self._fetch_account_usage(
                 info, entry.rejected_fingerprint if entry else None
@@ -5026,6 +5055,11 @@ class ClaudeAccountSwitcher:
                 continue
             entry = entries[num]
             _i = info_by_num[num]
+            if _i[4] and entry.token_dead() and not self._active_read_degraded:
+                # A healthy CLI may already have rotated while the backup
+                # still holds the condemned predecessor. Verify and resync
+                # before deciding that the user needs to log in again.
+                self._resync_rotated_backup(num, _i[1], _i[3], _i[5])
             if self._entry_token_dead(entry, num, _i[1], _i[5], _i[4]):
                 sentinels[num] = USAGE_RELOGIN_REQUIRED
             elif entry.auth_dead_strikes and entry.token_dead():
@@ -5038,10 +5072,21 @@ class ClaudeAccountSwitcher:
                     [num], {num: identities[num]}
                 )
                 entries = store.entries(identities, models)
+        # Credential expiry must not wait for a quota poll plan. Never
+        # consume an isolated live session's possibly superseded backup.
+        refresh_due = {
+            num for num, info in info_by_num.items()
+            if num not in sentinels
+            and oauth.is_oauth_token_expired(
+                (oauth.extract_oauth_data(info[5]) or {}).get("expiresAt")
+            )
+            and (info[4] or not self._live_session_pids(num, info[1]))
+        }
         requested = [
             num
             for num in info_by_num
-            if num not in sentinels and (fetch is None or num in fetch)
+            if num not in sentinels
+            and (fetch is None or num in fetch or num in refresh_due)
         ]
         if fetch is None:
             # Repair reset-parked plans written by releases that stopped
@@ -5062,6 +5107,14 @@ class ClaudeAccountSwitcher:
                 respect_plans=False,
                 repair_overslept=scheduled,
             )
+        # Quota-eligible rows use the usual refresh + fetch path. Only the
+        # credential renewals blocked by quota freshness/plans/429 take the
+        # authentication-only path, under the same fenced leases.
+        renewal_claims = store.reserve(
+            refresh_due - claims.keys(), identities,
+            respect_plans=True, refresh_due=refresh_due,
+        )
+        claims.update(renewal_claims)
         # An expired ACTIVE credential that cannot reach the fetch path (and
         # its locked refresh) this tick — failure backoff, a concurrent
         # collector's claim, poll-plan gate — must still surface the expired
@@ -5082,7 +5135,7 @@ class ClaudeAccountSwitcher:
         if claims:
             pre = entries
             records = self._run_usage_fetches(
-                [info_by_num[num] for num in claims], pre
+                [info_by_num[num] for num in claims], pre, set(renewal_claims)
             )
             plans = self._plans_after_fetch(records, pre, info_by_num)
             accepted = store.record(records, identities, claims, plans)
@@ -5228,7 +5281,8 @@ class ClaudeAccountSwitcher:
         threshold, models = self._poll_policy_inputs()
         plans: dict[str, tuple[float | None, float | None]] = {}
         for num, rec in records.items():
-            if rec.sentinel is not None or rec.error is not None:
+            if (rec.sentinel is not None or rec.error is not None
+                    or rec.credential_refreshed):
                 continue
             before = pre.get(num)
             recent_429 = before is not None and before.recent_429(now)
@@ -5579,6 +5633,8 @@ class ClaudeAccountSwitcher:
         if json_output:
             return self._build_list_payload(accounts_info, entries)
 
+        token_infos = ({str(info[0]): info for info in self._build_accounts_info()}
+                       if show_token_status else {})
         seq_data = self._get_sequence_data() or {}
         print(bolded("Accounts:"))
         for i, (num, email, org_name, org_uuid, is_active, _, alias) in enumerate(accounts_info):
@@ -5594,7 +5650,9 @@ class ClaudeAccountSwitcher:
                 print(f"     {line}")
 
             if show_token_status:
-                for line in self._token_status_lines(accounts_info[i]):
+                # Collection may have just renewed a credential. Do not
+                # diagnose the superseded pre-refresh snapshot as expired.
+                for line in self._token_status_lines(token_infos.get(str(num), accounts_info[i])):
                     print(f"     {dimmed('•')} {muted(line)}")
             if i < len(accounts_info) - 1:
                 print()

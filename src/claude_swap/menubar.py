@@ -30,6 +30,7 @@ from pathlib import Path
 
 from claude_swap import pace
 from claude_swap.exceptions import ClaudeSwitchError, CredentialReadError
+from claude_swap.json_output import USAGE_TOKEN_EXPIRED
 from claude_swap.printer import warning
 from claude_swap.switcher import SENTINEL_NOTES
 
@@ -396,6 +397,10 @@ def _account_display_usage(entry) -> dict | str | None:
     keychain unavailable), otherwise the last-good measurement dict, otherwise
     ``None``.
     """
+    if entry.sentinel == USAGE_TOKEN_EXPIRED and entry.last_good is not None:
+        # A temporary renewal wait is quiet in the menu. The entry keeps its
+        # sentinel for automatic decisions; only the display uses last-good.
+        return entry.last_good
     if entry.sentinel:
         return SENTINEL_NOTES.get(entry.sentinel, entry.sentinel)
     return entry.last_good

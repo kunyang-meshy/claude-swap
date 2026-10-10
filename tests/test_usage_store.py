@@ -1314,6 +1314,28 @@ class TestReserve:
         clock.advance(CLAIM_TTL_S + 1)  # claim expired, entry still fresh
         assert store.reserve(["1"], IDENT, respect_plans=True) == {}
 
+    def test_renewal_bypasses_quota_429_without_refetching_or_reaging_usage(self, store, clock):
+        store.record({"1": FetchRecord(usage=USAGE)}, IDENT)
+        store.set_poll_plan({"1": (clock.now + 600, 600)}, IDENT)
+        store.record({"1": FetchRecord(error="http-429", retry_after_s=300)}, IDENT)
+        before = store.entries(IDENT)["1"]
+        claims = store.reserve(["1"], IDENT, respect_plans=True, refresh_due={"1"})
+        assert set(claims) == {"1"}
+        assert store.reserve(["1"], IDENT, respect_plans=True, refresh_due={"1"}) == {}
+        store.record({"1": FetchRecord(credential_refreshed=True)}, IDENT, claims)
+        after = store.entries(IDENT)["1"]
+        assert after.last_good == before.last_good
+        assert after.fetched_at == before.fetched_at
+        assert after.next_poll_at == before.next_poll_at
+        assert after.last_error == "http-429"
+        assert after.backoff_until == before.backoff_until
+        assert store.reserve(["1"], IDENT, respect_plans=True) == {}
+
+    @pytest.mark.parametrize("failure", ["refresh-failed", "invalid_grant"])
+    def test_renewal_respects_auth_backoff_and_quarantine(self, store, failure):
+        store.record({"1": FetchRecord(error=failure)}, IDENT)
+        assert store.reserve(["1"], IDENT, respect_plans=True, refresh_due={"1"}) == {}
+
     def test_respect_plans_waits_for_next_poll(self, store, clock):
         self._stale(store, clock)
         store.set_poll_plan({"1": (clock.now + 300.0, 300.0)}, IDENT)

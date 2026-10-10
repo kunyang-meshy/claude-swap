@@ -339,7 +339,14 @@ def build_token_status(credentials: str) -> str | None:
         return f"oauth: unknown expiry, refresh token {refresh_str}"
 
     expires_utc = datetime.fromtimestamp(expires_at / 1000, tz=timezone.utc)
-    state = "expired" if is_oauth_token_expired(expires_at) else "fresh"
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if now_ms >= expires_at:
+        state = ("expired, automatic refresh pending" if has_refresh_token
+                 else "expired, login required")
+    elif is_oauth_token_expired(expires_at):
+        state = "refresh due"
+    else:
+        state = "fresh"
     countdown, clock = format_reset(expires_utc.isoformat())
     return f"oauth: {state}, refresh token {refresh_str}, expires {clock} in {countdown}"
 

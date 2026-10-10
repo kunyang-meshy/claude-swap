@@ -241,13 +241,15 @@ Identity = tuple[str, str]
 class FetchRecord:
     """Outcome of one fetch attempt, as handed to :meth:`UsageStore.record`.
 
-    Exactly one of three shapes:
+    Exactly one of four shapes:
     - success: ``error`` and ``sentinel`` are None (``usage`` may still be
       None when the response carried no window data);
     - failure: ``error`` set (with optional ``retry_after_s``);
     - sentinel: ``sentinel`` set — a derived state ("token expired" with an
       owner present, ...), recorded as a no-op: sentinels are re-derived every
       pass and never persisted.
+    - credential renewal: ``credential_refreshed`` set — authentication
+      succeeded without a quota measurement; keeps its age and poll plan.
     """
 
     usage: dict | None = None
@@ -267,6 +269,9 @@ class FetchRecord:
     # persists: later passes skip the request while the credential still
     # carries that token, and a success clears it.
     rejected_fp: str | None = None
+    # Credential renewal is independent of a quota measurement. It must not
+    # make lastGood newer or erase a usage-endpoint rate-limit backoff.
+    credential_refreshed: bool = False
 
 
 @dataclass(frozen=True)
@@ -997,6 +1002,7 @@ class UsageStore:
         *,
         respect_plans: bool,
         repair_overslept: bool = False,
+        refresh_due: Iterable[str] = (),
     ) -> dict[str, str]:
         """Atomically win the right to fetch: re-check eligibility and stamp
         a bounded lease in one locked pass, returning slot → fencing id.
@@ -1019,8 +1025,12 @@ class UsageStore:
           ``repair_overslept``, this becomes the non-escalating scheduler mode:
           due plans and stale impossible plans win, but valid future plans do
           not.
+        - ``refresh_due`` bypasses quota freshness and poll plans, and a
+          usage-endpoint 429 backoff, for credential-only renewal. Auth
+          failure backoff, quarantine, and competing claims still apply.
         """
         nums = list(nums)
+        refresh_due = set(refresh_due)
         if not nums:
             return {}
         now = self.clock()
@@ -1035,7 +1045,8 @@ class UsageStore:
                 else:
                     assert isinstance(row, dict)
                     if not _row_eligible(
-                        row, now, respect_plans, repair_overslept
+                        row, now, respect_plans, repair_overslept,
+                        credential_due=num in refresh_due,
                     ):
                         continue
                 claim_id = uuid.uuid4().hex
@@ -1079,6 +1090,15 @@ class UsageStore:
             if rec.sentinel is not None:
                 if rec.rejected_fp is not None:
                     row["rejectedFingerprint"] = rec.rejected_fp
+                return
+            if rec.credential_refreshed:
+                row["authDeadStrikes"] = 0
+                row["struckFingerprint"] = None
+                row["rejectedFingerprint"] = None
+                if row.get("lastError") != "http-429":
+                    row["consecutiveFailures"] = 0
+                    row["lastError"] = None
+                    row["backoffUntil"] = None
                 return
             row["lastAttemptAt"] = now
             if rec.error is None:
@@ -1196,14 +1216,16 @@ def _num_or_none(value: object) -> float | None:
 
 
 def _row_eligible(
-    row: dict, now: float, respect_plans: bool, repair_overslept: bool = False
+    row: dict, now: float, respect_plans: bool, repair_overslept: bool = False,
+    *, credential_due: bool = False,
 ) -> bool:
     """Fetch eligibility of a stored row, evaluated under the write lock
     (see :meth:`UsageStore.reserve` for the two caller modes)."""
     if int(row.get("authDeadStrikes") or 0) >= AUTH_DEAD_STRIKES:
         return False
     backoff_until = _num_or_none(row.get("backoffUntil"))
-    if backoff_until is not None and now < backoff_until:
+    if (backoff_until is not None and now < backoff_until
+            and not (credential_due and row.get("lastError") == "http-429")):
         return False
     if _live_claim(
         _num_or_none(row.get("claimUntil")),
@@ -1211,6 +1233,8 @@ def _row_eligible(
         now,
     ):
         return False
+    if credential_due:
+        return True
     fetched_at = _num_or_none(row.get("fetchedAt"))
     stale = fetched_at is None or (now - fetched_at) > SERVE_TTL_S
     next_poll_at = _num_or_none(row.get("nextPollAt"))

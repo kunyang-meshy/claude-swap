@@ -24,6 +24,14 @@ owner cannot be verified, automatic switching holds. Usage refresh also refuses
 to restore a different Team's backup over the live login. Menu selections,
 automatic decisions and metadata drift are recorded separately in the log.
 
+Access credentials renew automatically inside the five-minute expiry buffer,
+even when the quota poll is not due or its endpoint is rate-limited. Renewal
+uses Claude Code's credential locks and synchronizes the successor to the live
+store and backup. It does not make cached quota readings appear newer. Lock
+contention and transient failures retry quietly; only a confirmed unusable
+refresh credential is shown as requiring login. Isolated `cswap run` profiles
+continue to let their owning Claude Code process renew its own token family.
+
 Already-running CLI processes can retain their previous login state. If one
 still reports the old Team after a switch, exit that session when convenient
 and resume it with `claude --resume` (using the alias below) or
