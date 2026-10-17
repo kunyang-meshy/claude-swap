@@ -198,7 +198,7 @@ def plan_after_fetch(
     prev_usage: dict | None,
     new_usage: dict | None,
     is_active: bool,
-    threshold: float,
+    threshold: float | dict[str, float],
     models: tuple[str, ...],
     recent_429: bool,
     now: float,
@@ -223,6 +223,12 @@ def plan_after_fetch(
     base = prev_interval_s or default
     prev_pct = binding_pct(prev_usage, models)
     new_pct = binding_pct(new_usage, models)
+    threshold_margin = oauth.threshold_distance(new_usage, threshold, models)
+    if isinstance(threshold, dict):
+        # Follow the window nearest its own limit, even when another window
+        # has a larger raw percentage that is not moving this poll.
+        prev_pct = oauth.threshold_distance(prev_usage, threshold, models)
+        new_pct = threshold_margin
     if prev_pct is None or new_pct is None:
         moving = False
         interval = default
@@ -239,8 +245,8 @@ def plan_after_fetch(
         is_active
         and moving
         and not recent_429
-        and new_pct is not None
-        and new_pct >= threshold - ESCALATION_MARGIN_PCT
+        and threshold_margin is not None
+        and threshold_margin >= -ESCALATION_MARGIN_PCT
     ):
         interval = URGENT_INTERVAL_S
     if recent_429:

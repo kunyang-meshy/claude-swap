@@ -7,8 +7,8 @@ typed events handed to an ``on_event`` callback; the CLI renders them as
 human lines or JSONL, and any future frontend (TUI dashboard, menubar) can
 consume the same stream.
 
-Policy in one paragraph: when the active account's *binding window* (the
-higher of its 5h/7d utilization) crosses ``settings.threshold``, switch to
+Policy in one paragraph: when any active quota window reaches its configured
+threshold (each inherits ``settings.threshold`` unless overridden), switch to
 the candidate with the most headroom — proactively, so the old account is
 still valid while a running Claude Code picks the new one up (this is what
 makes the macOS ~30s Keychain cache latency harmless). Candidates must sit
@@ -316,6 +316,7 @@ class PollEvent(AutoSwitchEvent):
     # (e.g. "89%") hides which window binds — #115 was reported off that
     # ambiguity.
     windows: dict[str, dict[str, float]] = field(default_factory=dict)
+    thresholds: dict[str, float] | None = None
 
     def _fields(self) -> dict:
         fields = {
@@ -327,6 +328,8 @@ class PollEvent(AutoSwitchEvent):
             fields["fetchErrors"] = self.fetch_errors
         if self.windows:
             fields["windowsPct"] = self.windows
+        if self.thresholds is not None:
+            fields["thresholds"] = self.thresholds
         return fields
 
     def _describe(self, num: str) -> str:
@@ -355,9 +358,11 @@ class PollEvent(AutoSwitchEvent):
             if n != str(num)
         )
         tail = f" | others: {others}" if others else ""
+        limits = (" / ".join(f"{label} {pct_label(pct)}%" for label, pct in self.thresholds.items())
+                  if self.thresholds else f"{pct_label(self.threshold)}%")
         return (
             f"Account-{num} ({self.active.get('email')}): {used} "
-            f"(switch at {pct_label(self.threshold)}%){tail}"
+            f"(switch at {limits}){tail}"
         )
 
 
@@ -619,7 +624,9 @@ def _every_account_above_threshold(
     candidates: Sequence[str],
     headroom: dict[str, float | None],
     active_headroom: float | None,
-    threshold: float,
+    threshold: float | dict[str, float],
+    *, usage: dict | None = None, current: str | None = None,
+    models: tuple[str, ...] = (),
 ) -> bool:
     """Whether the active account AND every measured candidate are at or over
     the threshold — the state where "land somewhere healthy" has no answer.
@@ -630,12 +637,46 @@ def _every_account_above_threshold(
     verdict (it may be healthy, but it cannot be *chosen* either — the caller
     skips ``None`` headroom) as long as at least one candidate was measured.
     """
+    if isinstance(threshold, dict):
+        usage = usage or {}
+        active_margin = oauth.threshold_distance(usage.get(current), threshold, models)
+        measured = [oauth.threshold_distance(usage.get(n), threshold, models)
+                    for n in candidates if headroom.get(n) is not None]
+        return (active_headroom is not None and active_margin is not None
+                and active_margin >= 0 and bool(measured)
+                and all(m is not None and m >= 0 for m in measured))
     if active_headroom is None or (100.0 - active_headroom) < threshold:
         return False
     measured = [headroom.get(n) for n in candidates if headroom.get(n) is not None]
     if not measured:
         return False
     return all((100.0 - h) >= threshold for h in measured)
+
+
+def _landing_below_threshold(num, usage, headroom, settings, models=()) -> bool:
+    """A destination must satisfy every configured window limit."""
+    h = headroom.get(num)
+    if h is None or not math.isfinite(h):
+        return False
+    if settings.window_thresholds is None:
+        return 100.0 - h < settings.threshold
+    value = usage.get(num)
+    known = {label for label, pct, _ in oauth.relevant_windows(value, models)
+             if math.isfinite(pct)}
+    if not {"5h", "7d"} <= known:
+        return False
+    margin = oauth.threshold_distance(value, settings.poll_threshold, models)
+    return margin is not None and margin < 0
+
+
+def _below_threshold_detail(value, utilization, settings, models=()) -> str:
+    if settings.window_thresholds is None:
+        return f"{pct_label(utilization)}% < {pct_label(settings.threshold)}%"
+    limits = settings.window_thresholds
+    return "; ".join(
+        f"{label} {pct_label(pct)}% < {pct_label(limits.get(label, limits['7d']))}%"
+        for label, pct, _ in oauth.relevant_windows(value, models) if math.isfinite(pct)
+    ) or "window usage unavailable"
 
 
 def _ref(number: str, email: str) -> dict:
@@ -683,7 +724,7 @@ class AutoSwitchEngine:
         # Poll plans written by the collector must key on the same threshold/
         # models the engine decides with (CLI overrides included), not on
         # whatever the settings file happens to say.
-        switcher.set_poll_policy_inputs(settings.threshold, self._models)
+        switcher.set_poll_policy_inputs(settings.poll_threshold, self._models)
         self.on_event = on_event
         self.dry_run = dry_run
         self.state_path = state_path or (switcher.backup_dir / STATE_FILENAME)
@@ -932,7 +973,8 @@ class AutoSwitchEngine:
         current = self.switcher.current_account_number()
         if current is None:
             self._emit(
-                PollEvent(active=None, headroom={}, threshold=settings.threshold)
+                PollEvent(active=None, headroom={}, threshold=settings.threshold,
+                          thresholds=settings.window_thresholds)
             )
             if self.switcher.has_live_login():
                 # Live login exists but cswap doesn't manage it: never act —
@@ -959,13 +1001,14 @@ class AutoSwitchEngine:
         }
 
         entries, usage, headroom = self._collect_scheduled_usage(
-            current, quarantined, threshold=settings.threshold
+            current, quarantined, threshold=settings.poll_threshold
         )
         self._emit(
             PollEvent(
                 active=active_ref,
                 headroom=headroom,
                 threshold=settings.threshold,
+                thresholds=settings.window_thresholds,
                 fetch_errors={
                     num: entry.last_error
                     for num, entry in entries.items()
@@ -1001,16 +1044,16 @@ class AutoSwitchEngine:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
             utilization = 100.0 - active_headroom
-            if utilization < settings.threshold:
+            margin = oauth.threshold_distance(usage.get(current), settings.poll_threshold, self._models)
+            if margin is None or margin < 0:
                 if settings.strategy != "consume-first":
                     self._emit(
                         NoSwitchEvent(
                             reason="below-threshold",
                             # Both sides through pct_label: .0f utilization could
                             # display an impossible "100% < 99.9%".
-                            detail=(
-                                f"{pct_label(utilization)}% < "
-                                f"{pct_label(settings.threshold)}%"
+                            detail=_below_threshold_detail(
+                                usage.get(current), utilization, settings, self._models,
                             ),
                         )
                     )
@@ -1121,9 +1164,8 @@ class AutoSwitchEngine:
             self._emit(
                 NoSwitchEvent(
                     reason="below-threshold",
-                    detail=(
-                        f"{pct_label(100.0 - active_headroom)}% < "
-                        f"{pct_label(settings.threshold)}%"
+                    detail=_below_threshold_detail(
+                        usage.get(current), 100.0 - active_headroom, settings, self._models,
                     ),
                 )
             )
@@ -1202,6 +1244,7 @@ class AutoSwitchEngine:
                 recovered,
                 kw["settings"],
                 kw["current"],
+                kw["usage"],
             )
             ranked = self._rank_candidates(no_return=no_return, **kw)
             if no_return is not None and not ranked[0] and recovered:
@@ -1441,6 +1484,7 @@ class AutoSwitchEngine:
         recovered: bool,
         settings: AutoSwitchSettings,
         current: str | None = None,
+        usage: dict | None = None,
     ) -> str | None:
         """The account this engine most recently left, while it is still barred.
 
@@ -1544,7 +1588,7 @@ class AutoSwitchEngine:
                     return None               # beats us outright; not a flip
             elif (
                 settings is not None
-                and left_headroom > 100.0 - settings.threshold
+                and _landing_below_threshold(barred, usage or {}, headroom, settings, self._models)
             ):
                 # An unreadable active must not be silently scored as "the
                 # peer does not beat it" -- same landing-eligible fallback
@@ -1720,7 +1764,7 @@ class AutoSwitchEngine:
             # when a nearer window starts binding, never as a side effect
             # of the active spending down -- the failure mode a bare
             # dominance leg has, guarded directly in the mutation table.
-            if h is not None and h > 100.0 - settings.threshold:
+            if _landing_below_threshold(barred, usage, headroom, settings, self._models):
                 return True
             peer_recovery_ts = _binding_recovery_ts(usage.get(barred), self._models, now)
             active_recovery_ts = _binding_recovery_ts(usage.get(current), self._models, now)
@@ -1786,7 +1830,7 @@ class AutoSwitchEngine:
             if active_headroom is not None:
                 if h > active_headroom * HORIZON_HEADROOM_RATIO + SPENT_HEADROOM_PCT:
                     return True
-            elif h > 100.0 - settings.threshold:
+            elif _landing_below_threshold(barred, usage, headroom, settings, self._models):
                 return True
         if (
             isinstance(left_headroom, (int, float))
@@ -1835,7 +1879,9 @@ class AutoSwitchEngine:
                 if h is None or not math.isfinite(h):
                     continue
                 any_known = True
-                if num == no_return or (100.0 - h) >= settings.threshold:
+                if num == no_return or not _landing_below_threshold(
+                    num, usage, headroom, settings, self._models,
+                ):
                     continue
                 fable = _fable_headroom(usage.get(num))
                 if fable is None or fable <= 0:
@@ -1866,7 +1912,8 @@ class AutoSwitchEngine:
         # wins the normal way, and RECOVERY_HYSTERESIS_S below replaces the
         # percentage-point margin so two accounts in the 90s cannot ping-pong.
         all_above = _every_account_above_threshold(
-            oauth_candidates, headroom, active_headroom, settings.threshold
+            oauth_candidates, headroom, active_headroom, settings.poll_threshold,
+            usage=usage, current=current, models=self._models,
         )
         # "Is anything worth having?" — the most headroom any candidate with a
         # READABLE row offers. Two exclusions and no others:
@@ -1923,7 +1970,7 @@ class AutoSwitchEngine:
                 # would re-trigger on the very next tick. At-limit and failover
                 # are escapes that skip this whole block — any account with real
                 # headroom beats a blocked or dead one.
-                if (100.0 - h) >= settings.threshold and not all_above:
+                if not _landing_below_threshold(num, usage, headroom, settings, self._models) and not all_above:
                     continue
                 if all_above:
                     # Checked before the strategies, because with nothing below
@@ -2032,7 +2079,7 @@ class AutoSwitchEngine:
         current: str,
         quarantined: set[str] = frozenset(),
         *,
-        threshold: float | None = None,
+        threshold: float | dict[str, float] | None = None,
     ) -> tuple[dict, dict[str, dict | str | None], dict[str, float | None]]:
         """Two-phase usage collection with an O(1) baseline.
 
@@ -2133,12 +2180,13 @@ class AutoSwitchEngine:
         # The caller's tick-snapshotted threshold, so one tick fetches and
         # decides on the same value even if apply_threshold() lands mid-tick.
         if threshold is None:
-            threshold = self.settings.threshold
+            threshold = self.settings.poll_threshold
+        margin = oauth.threshold_distance(active_value, threshold, self._models)
         escalate = bool(candidates) and (
             (active_headroom is None and active_value != USAGE_TOKEN_EXPIRED)
             or (
                 active_headroom is not None
-                and 100.0 - active_headroom >= threshold - ESCALATION_MARGIN_PCT
+                and margin is not None and margin >= -ESCALATION_MARGIN_PCT
             )
         )
         if escalate:
@@ -2355,8 +2403,14 @@ class AutoSwitchEngine:
         cadence mid-run. Threshold only — the model axes (and their derived
         state) are fixed at construction. The frozen-settings swap is atomic
         and each tick snapshots ``self.settings`` once, so no locking."""
-        self.settings = replace(self.settings, threshold=threshold)
-        self.switcher.set_poll_policy_inputs(threshold, self._models)
+        self.settings = replace(self.settings, threshold=threshold,
+                                five_hour_threshold=None, seven_day_threshold=None)
+        self.switcher.set_poll_policy_inputs(self.settings.poll_threshold, self._models)
+
+    def apply_window_threshold(self, window: str, threshold: float) -> None:
+        field_name = {"5h": "five_hour_threshold", "7d": "seven_day_threshold"}[window]
+        self.settings = replace(self.settings, **{field_name: threshold})
+        self.switcher.set_poll_policy_inputs(self.settings.poll_threshold, self._models)
 
     def _next_delay(self, outcome: TickOutcome) -> float:
         interval = self.settings.interval_seconds

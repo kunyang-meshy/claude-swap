@@ -1294,6 +1294,7 @@ class _FakeEngine:
         self.dry_run = dry_run
         self.stopped = False
         self.applied_thresholds: list[float] = []
+        self.applied_window_thresholds: list[tuple[str, float]] = []
         self.wakes = 0
         self._stop = threading.Event()
         _FakeEngine.instances.append(self)
@@ -1311,6 +1312,9 @@ class _FakeEngine:
         self.settings = dataclasses.replace(self.settings, threshold=threshold)
         self.applied_thresholds.append(threshold)
 
+    def apply_window_threshold(self, window: str, threshold: float) -> None:
+        self.applied_window_thresholds.append((window, threshold))
+
     def wake(self) -> None:
         self.wakes += 1
 
@@ -1326,6 +1330,30 @@ def fake_engine(monkeypatch):
 
 @pytest.mark.asyncio
 class TestAutoScreen:
+    async def test_split_threshold_adjustment_changes_only_selected_window(self, tmp_path, fake_engine):
+        from claude_swap.settings import AutoSwitchSettings, save_settings
+        from textual.widgets import Static
+        save_settings(tmp_path, AutoSwitchSettings(five_hour_threshold=98, seven_day_threshold=92))
+        original = (tmp_path / "settings.json").read_bytes()
+        fake = FakeSwitcher([make_account(1, active=True), make_account(2)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._open(pilot)
+            screen = app.screen
+            assert app.threshold_pct == {"5h": 98, "7d": 92}
+            assert "5h 98% / 7d 92%" in screen.query_one("#auto-summary", Static).render().plain
+            await pilot.press("t", "left")
+            await pilot.pause()
+            assert app.threshold_pct == {"5h": 97, "7d": 92}
+            await pilot.press("tab", "right")
+            await pilot.pause()
+            assert app.threshold_pct == {"5h": 97, "7d": 93}
+            assert fake_engine.instances[0].applied_window_thresholds == [("5h", 97), ("7d", 93)]
+            await pilot.press("enter", "escape")
+            await settle(pilot)
+            assert app.threshold_pct == {"5h": 98, "7d": 92}
+            assert (tmp_path / "settings.json").read_bytes() == original
+
     async def _open(self, pilot):
         await settle(pilot)
         await pilot.press("g")

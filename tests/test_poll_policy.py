@@ -36,6 +36,20 @@ def _plan(**overrides):
 
 
 class TestIntervalAdaptation:
+    def test_weekly_threshold_controls_urgency_when_5h_is_below_its_own_limit(self):
+        previous = {"five_hour": {"pct": 95}, "seven_day": {"pct": 88}}
+        current = {"five_hour": {"pct": 95}, "seven_day": {"pct": 91}}
+        _, interval = _plan(prev_usage=previous, new_usage=current, is_active=True,
+                            threshold={"5h": 98, "7d": 92}, prev_interval_s=300)
+        assert interval == poll_policy.URGENT_INTERVAL_S
+
+    def test_5h_82_does_not_use_the_lower_weekly_threshold_for_urgent_polling(self):
+        previous = {"five_hour": {"pct": 81}, "seven_day": {"pct": 10}}
+        current = {"five_hour": {"pct": 82}, "seven_day": {"pct": 10}}
+        _, interval = _plan(prev_usage=previous, new_usage=current, is_active=True,
+                            threshold={"5h": 98, "7d": 92}, prev_interval_s=300)
+        assert interval != poll_policy.URGENT_INTERVAL_S
+
     def test_first_fetch_uses_defaults(self):
         _, active = _plan(is_active=True)
         _, candidate = _plan(is_active=False)

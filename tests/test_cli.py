@@ -1126,6 +1126,11 @@ class TestAutoCommand:
         assert engine.settings.threshold == 60.0     # CLI wins
         assert engine.settings.cooldown_seconds == 42.0  # settings.json kept
 
+    def test_independent_threshold_flags_override_settings(self, temp_home):
+        self._run(["--once", "--five-hour-threshold", "98", "--seven-day-threshold", "92"], temp_home)
+        engine = self.FakeEngine.instances[-1]
+        assert engine.settings.poll_threshold == {"5h": 98, "7d": 92}
+
     def test_dry_run_forwarded(self, temp_home):
         self._run(["--once", "--dry-run"], temp_home)
         assert self.FakeEngine.instances[-1].dry_run is True

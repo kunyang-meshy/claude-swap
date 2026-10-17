@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import sys
 import urllib.error
 import urllib.request
@@ -578,6 +579,25 @@ def relevant_windows(
                 ):
                     windows.append((s["name"], float(s["pct"]), s.get("resets_at")))
     return windows
+
+
+def threshold_distance(
+    usage: dict | None,
+    threshold: float | dict[str, float],
+    models: Sequence[str] = (),
+) -> float | None:
+    """Points above the closest switch threshold, negative while below all.
+
+    Scoped model quotas are weekly and use the 7d threshold. Fable remains
+    only a target filter unless explicitly included in ``models``.
+    """
+    margins = [
+        pct - (threshold.get(label, threshold["7d"])
+               if isinstance(threshold, dict) else threshold)
+        for label, pct, _ in relevant_windows(usage, models)
+        if math.isfinite(pct)
+    ]
+    return max(margins) if margins else None
 
 
 def account_headroom(

@@ -43,7 +43,8 @@ uv tool install --force --with rumps \
 cswap-cli init
 claude-cli auth login
 cswap-cli add
-cswap-cli config set autoswitch.threshold 95
+cswap-cli config set autoswitch.fiveHourThreshold 98
+cswap-cli config set autoswitch.sevenDayThreshold 92
 cswap-cli config set autoswitch.failoverEnabled false
 cswap-cli menubar
 ```
@@ -64,6 +65,13 @@ credential mismatches keep the current account indefinitely while polling
 continues. Once usage becomes readable again, the usual threshold policy
 resumes. Manual switches still work. The setting defaults to `true` for
 compatibility with upstream, so apply the command above to disable failover.
+
+The two quota windows can have independent switching limits: with the values
+above, switch when **5h usage ≥98% OR 7d usage ≥92%**. Candidates must satisfy
+**5h <98% AND 7d <92%**. The menu bar has a separate threshold submenu for each
+window. `cswap auto --five-hour-threshold 98 --seven-day-threshold 92` overrides
+them for one run. Unset a window key to inherit the legacy `autoswitch.threshold`;
+an explicit legacy `--threshold` flag sets both windows for that invocation.
 
 To prioritize expiring weekly quota while keeping the threshold trigger:
 

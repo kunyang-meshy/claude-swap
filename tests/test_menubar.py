@@ -75,6 +75,15 @@ def test_settings_defaults_when_file_missing(tmp_path: Path):
     assert s.auto_switch_enabled is False
 
 
+def test_threshold_menu_keys_update_each_window_independently(tmp_path):
+    from claude_swap.settings import load_settings, set_setting
+    set_setting(tmp_path, menubar.AUTO_THRESHOLD_KEYS["5h"], "98")
+    set_setting(tmp_path, menubar.AUTO_THRESHOLD_KEYS["7d"], "92")
+    assert load_settings(tmp_path).window_thresholds == {"5h": 98, "7d": 92}
+    set_setting(tmp_path, menubar.AUTO_THRESHOLD_KEYS["7d"], "90")
+    assert load_settings(tmp_path).window_thresholds == {"5h": 98, "7d": 90}
+
+
 def test_settings_round_trip(tmp_path: Path):
     path = tmp_path / "menubar_settings.json"
     original = menubar.MenuBarSettings(

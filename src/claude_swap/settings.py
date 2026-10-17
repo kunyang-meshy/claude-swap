@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -33,8 +34,10 @@ _logger = logging.getLogger("claude-swap")
 class AutoSwitchSettings:
     """Policy knobs for the auto-switch engine (``cswap auto``).
 
-    ``threshold`` is binding-window utilization (max of the 5h/7d percentages):
-    at or above it the engine looks for a better account. 90 rather than 95
+    ``threshold`` is the fallback utilization limit. Each window may override
+    it with ``five_hour_threshold`` or ``seven_day_threshold``; reaching ANY
+    limit triggers selection, and a healthy target must be below BOTH.
+    With no overrides this is max(5h, 7d), as before. 90 rather than 95
     leaves margin for the macOS ~30s Keychain pickup tail and for heavy
     subagent turns burning past the mark before a swap lands. A proactive
     candidate must itself sit below the threshold (never land somewhere that
@@ -58,6 +61,28 @@ class AutoSwitchSettings:
     # 5h/7d windows still have headroom. None = account-wide 5h/7d only
     # (default).
     model: str | None = None
+    # None inherits the legacy threshold; independent values are opt-in.
+    five_hour_threshold: float | None = None
+    seven_day_threshold: float | None = None
+
+    @property
+    def window_thresholds(self) -> dict[str, float] | None:
+        if self.five_hour_threshold is None and self.seven_day_threshold is None:
+            return None
+        return {
+            "5h": self.threshold if self.five_hour_threshold is None else self.five_hour_threshold,
+            "7d": self.threshold if self.seven_day_threshold is None else self.seven_day_threshold,
+        }
+
+    @property
+    def poll_threshold(self) -> float | dict[str, float]:
+        return self.window_thresholds or self.threshold
+
+    @property
+    def threshold_summary(self) -> str:
+        if self.window_thresholds is None:
+            return f"{self.threshold:.10g}%"
+        return " / ".join(f"{label} {pct:.10g}%" for label, pct in self.window_thresholds.items())
 
 
 @dataclass(frozen=True)
@@ -105,7 +130,15 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     for spec in (
         SettingSpec(
             "autoswitch", "threshold", "threshold", "float", 50.0, 99.9,
-            help="Switch when the binding 5h/7d window reaches this pct",
+            help="Fallback threshold for windows without an individual threshold",
+        ),
+        SettingSpec(
+            "autoswitch", "fiveHourThreshold", "five_hour_threshold", "float", 50.0, 99.9,
+            help="Switch at this 5h utilization (unset inherits threshold)",
+        ),
+        SettingSpec(
+            "autoswitch", "sevenDayThreshold", "seven_day_threshold", "float", 50.0, 99.9,
+            help="Switch at this weekly utilization (unset inherits threshold)",
         ),
         SettingSpec(
             "autoswitch", "intervalSeconds", "interval_seconds", "float", 15.0, 3600.0,
@@ -175,8 +208,9 @@ def parse_model_names(value: str | None) -> tuple[str, ...]:
 def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
     """Clamp values into the SETTING_SPECS ranges; bad types → the default."""
 
-    def num(value, default: float, lo: float, hi: float) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+    def num(value, default: float | None, lo: float, hi: float) -> float | None:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
             return default
         return float(min(max(value, lo), hi))
 
@@ -429,8 +463,13 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
 def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
     """Overlay non-None CLI overrides (argparse Namespace) onto settings."""
     overrides = {}
+    if getattr(args, "threshold", None) is not None:
+        # Explicit legacy CLI flag sets both windows for this invocation.
+        overrides.update(five_hour_threshold=None, seven_day_threshold=None)
     for attr, field in (
         ("threshold", "threshold"),
+        ("five_hour_threshold", "five_hour_threshold"),
+        ("seven_day_threshold", "seven_day_threshold"),
         ("interval", "interval_seconds"),
         ("cooldown", "cooldown_seconds"),
         ("include_api_key_accounts", "include_api_key_accounts"),

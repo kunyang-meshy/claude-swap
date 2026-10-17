@@ -332,8 +332,8 @@ class ClaudeAccountSwitcher:
         self._logger = setup_logging(self.backup_dir, debug=debug)
         self._usage_store = UsageStore(self.backup_dir / "cache")
         # (settings mtime, (threshold, models)) — see _poll_policy_inputs.
-        self._poll_inputs_cache: tuple[float | None, tuple[float, tuple[str, ...]]] | None = None
-        self._poll_inputs_override: tuple[float, tuple[str, ...]] | None = None
+        self._poll_inputs_cache: tuple[float | None, tuple[float | dict[str, float], tuple[str, ...]]] | None = None
+        self._poll_inputs_override: tuple[float | dict[str, float], tuple[str, ...]] | None = None
 
         # The credential storage layer (active + per-account backup stores, macOS
         # Keychain-vs-file routing, the per-process capability cache). Reads its
@@ -1791,7 +1791,7 @@ class ClaudeAccountSwitcher:
         }
 
     def set_poll_policy_inputs(
-        self, threshold: float, models: tuple[str, ...]
+        self, threshold: float | dict[str, float], models: tuple[str, ...]
     ) -> None:
         """Pin the threshold/models poll planning keys on (set by a hosted
         auto engine so cadence follows its effective, CLI-merged settings
@@ -1805,7 +1805,7 @@ class ClaudeAccountSwitcher:
         engine it belonged to is gone."""
         self._poll_inputs_override = None
 
-    def _poll_policy_inputs(self) -> tuple[float, tuple[str, ...]]:
+    def _poll_policy_inputs(self) -> tuple[float | dict[str, float], tuple[str, ...]]:
         """Threshold + configured model names for poll planning: the hosting
         engine's pinned values when present, else the settings file (reloaded
         only when it changes — one stat per pass)."""
@@ -1819,7 +1819,7 @@ class ClaudeAccountSwitcher:
         if self._poll_inputs_cache is not None and self._poll_inputs_cache[0] == mtime:
             return self._poll_inputs_cache[1]
         loaded = load_settings(self.backup_dir)
-        inputs = (loaded.threshold, parse_model_names(loaded.model))
+        inputs = (loaded.poll_threshold, parse_model_names(loaded.model))
         self._poll_inputs_cache = (mtime, inputs)
         return inputs
 

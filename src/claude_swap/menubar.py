@@ -36,7 +36,8 @@ from claude_swap.switcher import SENTINEL_NOTES
 
 ICON = "⇄"
 REFRESH_CHOICES: tuple[int, ...] = (30, 60, 300)
-AUTO_THRESHOLD_CHOICES: tuple[int, ...] = (80, 90, 95, 98)
+AUTO_THRESHOLD_CHOICES: tuple[int, ...] = (80, 90, 92, 95, 98)
+AUTO_THRESHOLD_KEYS = {"5h": "autoswitch.fiveHourThreshold", "7d": "autoswitch.sevenDayThreshold"}
 TITLE_PCT_CHOICES: tuple[str, ...] = ("off", "5h", "7d", "both")
 SWITCH_HISTORY_LIMIT = 10
 NOTIFICATION_BUNDLE_ID = "com.claude-swap.menubar"
@@ -755,10 +756,11 @@ def run(switcher) -> int:
                     # menu-bar user with a silently inert filter.
                     rumps.notification("claude-swap", "Configuration warning", ev.human())
 
-        def _threshold(self) -> int:
+        def _threshold(self, window: str) -> float:
             """Current auto-switch threshold from core settings (for the menu)."""
             try:
-                return int(load_settings(self.switcher.backup_dir).threshold)
+                policy = load_settings(self.switcher.backup_dir)
+                return (policy.window_thresholds or {"5h": policy.threshold, "7d": policy.threshold})[window]
             except Exception:
                 return 0
 
@@ -906,17 +908,18 @@ def run(switcher) -> int:
                 interval.add(choice)
             menu.add(interval)
 
-            auto_item = rumps.MenuItem("Auto-switch accounts", callback=self.on_toggle_autoswitch)
+            auto_item = rumps.MenuItem("Auto-switch Teams", callback=self.on_toggle_autoswitch)
             auto_item.state = 1 if self.settings.auto_switch_enabled else 0
             menu.add(auto_item)
 
-            threshold_menu = rumps.MenuItem("Auto-switch threshold")
-            current = self._threshold()
-            for pct in AUTO_THRESHOLD_CHOICES:
-                ch = rumps.MenuItem(f"{pct}%", callback=self._make_threshold(pct))
-                ch.state = 1 if current == pct else 0
-                threshold_menu.add(ch)
-            menu.add(threshold_menu)
+            for window in AUTO_THRESHOLD_KEYS:
+                current = self._threshold(window)
+                threshold_menu = rumps.MenuItem(f"{window} switch threshold: {current:g}%")
+                for pct in sorted({*AUTO_THRESHOLD_CHOICES, current}):
+                    ch = rumps.MenuItem(f"{pct:g}%", callback=self._make_threshold(window, pct))
+                    ch.state = 1 if current == pct else 0
+                    threshold_menu.add(ch)
+                menu.add(threshold_menu)
 
             return menu
 
@@ -1081,10 +1084,10 @@ def run(switcher) -> int:
                 self._stop_engine()
             self.rebuild_menu()
 
-        def _make_threshold(self, pct):
+        def _make_threshold(self, window, pct):
             def cb(_sender):
                 try:
-                    set_setting(self.switcher.backup_dir, "autoswitch.threshold", str(pct))
+                    set_setting(self.switcher.backup_dir, AUTO_THRESHOLD_KEYS[window], str(pct))
                 except Exception as e:
                     rumps.alert(title="claude-swap", message=f"Couldn't set threshold: {e}")
                     return

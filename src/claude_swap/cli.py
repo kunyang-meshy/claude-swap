@@ -643,6 +643,10 @@ Defaults live in settings.json in the backup root; flags override them.
         metavar="SECONDS",
         help="Minimum time between proactive switches (default 300)",
     )
+    parser.add_argument("--five-hour-threshold", type=float, metavar="PCT",
+                        help="Switch at this 5h utilization (50-99.9)")
+    parser.add_argument("--seven-day-threshold", type=float, metavar="PCT",
+                        help="Switch at this weekly utilization (50-99.9)")
     parser.add_argument(
         "--model",
         metavar="NAMES",
@@ -726,7 +730,7 @@ Defaults live in settings.json in the backup root; flags override them.
         if not args.json:
             print(
                 dimmed(
-                    f"Auto-switch running: threshold {settings.threshold:.0f}%, "
+                    f"Auto-switch running: threshold {settings.threshold_summary}, "
                     f"every {settings.interval_seconds:.0f}s"
                     f"{' (dry-run)' if args.dry_run else ''} — Ctrl-C to stop"
                 )

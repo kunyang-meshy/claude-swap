@@ -40,6 +40,33 @@ def _args(**kwargs) -> argparse.Namespace:
 
 
 class TestLoadSettings:
+    def test_independent_windows_inherit_legacy_only_when_unset(self, tmp_path):
+        set_setting(tmp_path, "autoswitch.threshold", "95")
+        assert load_settings(tmp_path).poll_threshold == 95
+        set_setting(tmp_path, "autoswitch.sevenDayThreshold", "92")
+        assert load_settings(tmp_path).poll_threshold == {"5h": 95, "7d": 92}
+        set_setting(tmp_path, "autoswitch.fiveHourThreshold", "98")
+        settings = load_settings(tmp_path)
+        assert settings.poll_threshold == {"5h": 98, "7d": 92}
+        assert settings.threshold_summary == "5h 98% / 7d 92%"
+        assert unset_setting(tmp_path, "autoswitch.sevenDayThreshold")
+        assert load_settings(tmp_path).poll_threshold == {"5h": 98, "7d": 95}
+
+    @pytest.mark.parametrize("key", ["fiveHourThreshold", "sevenDayThreshold"])
+    @pytest.mark.parametrize("invalid", ["nan", "inf", "49", "100", "wrong"])
+    def test_independent_window_rejects_invalid_values(self, tmp_path, key, invalid):
+        with pytest.raises(ConfigError):
+            set_setting(tmp_path, f"autoswitch.{key}", invalid)
+
+    def test_split_thresholds_roundtrip_and_cli_overrides(self, tmp_path):
+        settings = AutoSwitchSettings(threshold=95, five_hour_threshold=98, seven_day_threshold=92,
+                                      failover_enabled=False, strategy="fable-reset-first")
+        save_settings(tmp_path, settings)
+        assert load_settings(tmp_path) == settings
+        assert merged_with_cli(settings, _args(seven_day_threshold=91)).poll_threshold == {"5h": 98, "7d": 91}
+        assert merged_with_cli(settings, _args(threshold=80)).poll_threshold == 80
+        assert merged_with_cli(settings, _args(threshold=80, seven_day_threshold=91)).poll_threshold == {"5h": 80, "7d": 91}
+
     def test_missing_file_gives_defaults(self, tmp_path: Path):
         assert load_settings(tmp_path) == AutoSwitchSettings()
 

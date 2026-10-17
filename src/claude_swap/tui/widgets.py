@@ -164,7 +164,7 @@ def account_card_text(
     acc: AccountSnapshot,
     width: int,
     *,
-    threshold: float | None = None,
+    threshold: float | dict[str, float] | None = None,
     now: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
@@ -233,7 +233,8 @@ def account_card_text(
                 suffix or None,
                 bar_width,
                 stale=stale,
-                threshold=threshold,
+                threshold=(threshold.get(label.strip(), threshold["7d"])
+                           if isinstance(threshold, dict) else threshold),
                 palette=palette,
             )
         )
@@ -362,7 +363,7 @@ class AccountsPanel(Static):
 class AccountCard(Static):
     """One account rendered full-size (used by the switch screen's list)."""
 
-    def __init__(self, acc: AccountSnapshot, *, threshold: float | None = None) -> None:
+    def __init__(self, acc: AccountSnapshot, *, threshold: float | dict[str, float] | None = None) -> None:
         super().__init__()
         self._acc = acc
         self._threshold = threshold

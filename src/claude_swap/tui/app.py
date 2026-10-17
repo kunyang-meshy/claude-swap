@@ -73,9 +73,9 @@ class CswapApp(App):
         # The auto-switch threshold, drawn as a tick on the status strip's
         # bars everywhere. Missing/invalid settings fall back to the default.
         try:
-            self.threshold_pct: float | None = load_settings(
+            self.threshold_pct: float | dict[str, float] | None = load_settings(
                 switcher.backup_dir
-            ).threshold
+            ).poll_threshold
         except Exception:
             self.threshold_pct = None
         try:

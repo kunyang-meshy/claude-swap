@@ -2832,6 +2832,85 @@ def _usage7(pct5: float, pct7: float, reset7: str | None = None) -> dict:
     return {"five_hour": {"pct": pct5}, "seven_day": seven}
 
 
+class TestIndependentWindowThresholds:
+    def harness(self, temp_home):
+        h = EngineHarness(temp_home, threshold=98, five_hour_threshold=98,
+                          seven_day_threshold=92, strategy="fable-reset-first",
+                          failover_enabled=False)
+        for num in range(1, 7):
+            h.seed(num, f"team{num}@example.com")
+        h.make_live("team1@example.com", 1)
+        return h
+
+    @staticmethod
+    def usage(five, seven, reset=_R_LATER, fable=20):
+        return {**_usage7(five, seven, reset), "scoped": [{"name": "Fable", "pct": fable}]}
+
+    def fleet(self, active):
+        return {"1": active, "2": self.usage(97.5, 91.5, _R_SOON),
+                "3": self.usage(0, 0, _R_LATER),
+                "4": self.usage(0, 0, _R_LATEST),
+                "5": self.usage(10, 10, _R_LATEST),
+                "6": self.usage(20, 20, _R_LATEST)}
+
+    @pytest.mark.parametrize("five,seven", [(94, 20), (97.99, 91.99), (97.9, 20), (0, 91.99)])
+    def test_stays_below_each_own_threshold(self, temp_home, five, seven):
+        h = self.harness(temp_home)
+        assert h.tick_with_usage(self.fleet(self.usage(five, seven, fable=100))) is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        assert h.events[-1].reason == "below-threshold"
+
+    @pytest.mark.parametrize("five,seven", [(98, 0), (99, 20), (0, 92), (96, 92), (98, 92)])
+    def test_either_threshold_selects_earliest_weekly_reset_among_six(self, temp_home, five, seven):
+        h = self.harness(temp_home)
+        assert h.tick_with_usage(self.fleet(self.usage(five, seven))) is TickOutcome.SWITCHED
+        # Team 2 has less headroom than Team 3, but the earliest 7d reset.
+        assert h.active_number() == 2
+        poll = next(e for e in h.events if isinstance(e, PollEvent))
+        assert poll.to_json()["thresholds"] == {"5h": 98, "7d": 92}
+        assert "5h 98% / 7d 92%" in poll.human()
+
+    @pytest.mark.parametrize("five,seven,fable", [(98, 0, 20), (0, 92, 20), (0, 0, 100)])
+    def test_destination_must_be_below_both_limits_and_have_fable(self, temp_home, five, seven, fable):
+        h = self.harness(temp_home)
+        fleet = self.fleet(self.usage(98, 0))
+        fleet["2"] = self.usage(five, seven, _R_SOON, fable)
+        assert h.tick_with_usage(fleet) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_no_eligible_destination_holds_current(self, temp_home):
+        h = self.harness(temp_home)
+        fleet = self.fleet(self.usage(98, 92))
+        for num in range(2, 7):
+            fleet[str(num)] = self.usage(10, 92, _R_SOON)
+        assert h.tick_with_usage(fleet) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+
+    @pytest.mark.parametrize("missing", ["five_hour", "seven_day"])
+    def test_partial_candidate_cannot_prove_both_limits(self, temp_home, missing):
+        h = self.harness(temp_home)
+        fleet = self.fleet(self.usage(98, 0))
+        del fleet["2"][missing]
+        assert h.tick_with_usage(fleet) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    @pytest.mark.parametrize("unavailable", [None, USAGE_TOKEN_EXPIRED, USAGE_FOREIGN_CREDENTIAL])
+    def test_unknown_active_still_never_fails_over(self, temp_home, unavailable):
+        h = self.harness(temp_home)
+        for _ in range(4):
+            assert h.tick_with_usage(self.fleet(unavailable)) is TickOutcome.NO_ACTION
+            h.clock.advance(600)
+        assert h.active_number() == 1
+
+    def test_approaching_weekly_threshold_escalates_candidate_refresh(self, temp_home):
+        h = self.harness(temp_home)
+        fleet = self.fleet(self.usage(30, 91))
+        entries = {n: _entry_for(v, h.clock()) for n, v in fleet.items()}
+        with patch.object(h.switcher, "usage_entries_by_account", return_value=entries) as fetch:
+            assert h.engine.tick() is TickOutcome.NO_ACTION
+        assert any(call.kwargs.get("fetch") == set(fleet) for call in fetch.call_args_list)
+
+
 class TestFableResetFirstStrategy:
     def _harness(self, temp_home: Path, **kwargs) -> EngineHarness:
         h = EngineHarness(
